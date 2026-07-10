@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
 DATA_PATH = os.path.join("data", "mnist", "mnist.pkl.gz")
 CHECKPOINT_DIR = "checkpoints"
@@ -57,7 +58,8 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         num_batches = 0
-        for batch in loader:
+        pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", ncols=80)
+        for batch in pbar:
             x0 = batch[0].to(diffusion.device)
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
@@ -66,9 +68,10 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
             total_loss += loss.item()
             num_batches += 1
             global_step += 1
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch}/{epochs}  loss={avg_loss:.6f}")
+        print(f"Epoch {epoch}/{epochs}  avg_loss={avg_loss:.6f}")
 
         if epoch % save_interval == 0 or epoch == epochs:
             ckpt_path = os.path.join(CHECKPOINT_DIR, f"ddpm_epoch{epoch}.pt")
