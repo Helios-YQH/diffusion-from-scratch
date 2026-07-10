@@ -1,3 +1,23 @@
+"""
+DDPM Diffusion Model for MNIST Handwritten Digit Generation.
+
+Usage:
+  # Train on CPU (auto-detect)
+  python main.py train --epochs 50 --batch-size 128
+
+  # Train on 6 GPUs with DataParallel
+  python main.py train --epochs 50 --batch-size 128 --gpus 0,1,2,3,4,5
+
+  # Train on all available GPUs (default)
+  python main.py train --epochs 50 --batch-size 128
+
+  # Sample from a trained checkpoint (latest in checkpoints/ by default)
+  python main.py sample --checkpoint checkpoints/ddpm_epoch50.pt --n 64
+
+  # Sample with auto-detect latest checkpoint
+  python main.py sample --n 16
+"""
+
 import argparse
 import os
 import torch

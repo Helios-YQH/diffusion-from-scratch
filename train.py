@@ -1,6 +1,7 @@
 import gzip
 import pickle
 import os
+import warnings
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
@@ -12,7 +13,9 @@ CHECKPOINT_DIR = "checkpoints"
 
 def load_mnist(normalize=True):
     with gzip.open(DATA_PATH, "rb") as f:
-        train, val, test = pickle.load(f, encoding="latin1")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*align.*")
+            train, val, test = pickle.load(f, encoding="latin1")
     x_train, y_train = train
     x_train = x_train.reshape(-1, 1, 28, 28).astype(np.float32)
     if normalize:
