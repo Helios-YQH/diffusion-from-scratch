@@ -37,14 +37,18 @@ def save_sample_grid(images, path, nrow=4):
     plt.close()
 
 
-def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10):
+def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
+          use_data_parallel=False):
     x_train = load_mnist()
     dataset = TensorDataset(x_train)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        pin_memory=use_data_parallel)
 
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=lr)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs("samples", exist_ok=True)
+
+    model_for_save = diffusion.model.module if use_data_parallel else diffusion.model
 
     global_step = 0
     for epoch in range(1, epochs + 1):
@@ -65,7 +69,7 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10):
 
         if epoch % save_interval == 0 or epoch == epochs:
             ckpt_path = os.path.join(CHECKPOINT_DIR, f"ddpm_epoch{epoch}.pt")
-            torch.save(diffusion.model.state_dict(), ckpt_path)
+            torch.save(model_for_save.state_dict(), ckpt_path)
             print(f"  Checkpoint saved: {ckpt_path}")
 
             samples = diffusion.sample(16)

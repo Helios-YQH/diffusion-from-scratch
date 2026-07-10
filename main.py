@@ -1,6 +1,7 @@
 import argparse
 import os
 import torch
+import torch.nn as nn
 
 from model import UNet
 from diffusion import DDPM
@@ -17,17 +18,39 @@ def main():
     parser.add_argument("--n", type=int, default=16, help="number of images to sample")
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--timesteps", type=int, default=1000)
+    parser.add_argument("--gpus", type=str, default=None,
+                        help="GPU ids to use, e.g. '0,1,2,3,4,5'. Default: all available")
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    if torch.cuda.is_available():
+        if args.gpus is not None:
+            gpu_ids = [int(x) for x in args.gpus.split(",")]
+        else:
+            gpu_ids = list(range(torch.cuda.device_count()))
+        device = f"cuda:{gpu_ids[0]}"
+        print(f"Using {len(gpu_ids)} GPUs: {gpu_ids}")
+    else:
+        gpu_ids = []
+        device = "cpu"
+        print("Device: cpu")
 
     model = UNet(img_channels=1, base_channels=64, time_dim=256)
-    diffusion = DDPM(model, T=args.timesteps, device=device)
+
+    use_data_parallel = len(gpu_ids) > 1
+    if use_data_parallel:
+        model = nn.DataParallel(model, device_ids=gpu_ids)
+        per_gpu_batch = args.batch_size
+        batch_size = args.batch_size * len(gpu_ids)
+        print(f"DataParallel mode: per-GPU batch={per_gpu_batch}, total batch={batch_size}")
+    else:
+        batch_size = args.batch_size
+
+    diffusion = DDPM(model, T=args.timesteps, device=device, use_data_parallel=use_data_parallel)
 
     if args.mode == "train":
-        train(diffusion, epochs=args.epochs, batch_size=args.batch_size,
-              lr=args.lr, save_interval=args.save_interval)
+        train(diffusion, epochs=args.epochs, batch_size=batch_size,
+              lr=args.lr, save_interval=args.save_interval,
+              use_data_parallel=use_data_parallel)
 
     elif args.mode == "sample":
         ckpt = args.checkpoint
@@ -35,8 +58,9 @@ def main():
             ckpt = os.path.join("checkpoints", sorted(os.listdir("checkpoints"))[-1])
         print(f"Loading checkpoint: {ckpt}")
         state = torch.load(ckpt, map_location=device, weights_only=True)
-        model.load_state_dict(state)
-        model.to(device)
+        base_model = model.module if use_data_parallel else model
+        base_model.load_state_dict(state)
+        base_model.to(device)
 
         samples, steps = diffusion.sample(args.n, return_all=True)
 

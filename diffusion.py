@@ -4,8 +4,10 @@ import numpy as np
 
 
 class DDPM:
-    def __init__(self, model, T=1000, beta_start=1e-4, beta_end=0.02, device="cpu"):
+    def __init__(self, model, T=1000, beta_start=1e-4, beta_end=0.02, device="cpu",
+                 use_data_parallel=False):
         self.model = model.to(device)
+        self.use_data_parallel = use_data_parallel
         self.T = T
         self.device = device
 
