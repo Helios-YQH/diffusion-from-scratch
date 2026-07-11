@@ -98,8 +98,14 @@ class UpSample(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, img_channels=1, base_channels=64, time_dim=256):
+    def __init__(self, img_channels=1, base_channels=64, time_dim=256,
+                 num_downs=3, blocks_per_stage=2):
         super().__init__()
+        self.img_channels = img_channels
+        self.base_channels = base_channels
+        self.num_downs = num_downs
+        self.blocks_per_stage = blocks_per_stage
+
         self.time_dim = time_dim
         self.time_embed = SinusoidalTimeEmbedding(time_dim)
         self.time_mlp = TimeMLP(time_dim)
@@ -107,34 +113,41 @@ class UNet(nn.Module):
         ch = base_channels
         self.conv_in = nn.Conv2d(img_channels, ch, 3, padding=1)
 
-        # Down stages: 28 -> 14 -> 7
-        self.down1_block1 = ResidualBlock(ch, ch, time_dim)
-        self.down1_block2 = ResidualBlock(ch, ch, time_dim)
-        self.down1_sample = DownSample(ch)
-
-        self.down2_block1 = ResidualBlock(ch, ch * 2, time_dim)
-        self.down2_block2 = ResidualBlock(ch * 2, ch * 2, time_dim)
-        self.down2_sample = DownSample(ch * 2)
-
-        self.down3_block1 = ResidualBlock(ch * 2, ch * 4, time_dim)
-        self.down3_block2 = ResidualBlock(ch * 4, ch * 4, time_dim)
+        # Down stages
+        self.downs = nn.ModuleList()
+        in_ch = ch
+        for i in range(num_downs):
+            stage_ch = ch * (2 ** i)
+            stage = nn.ModuleList()
+            stage.append(ResidualBlock(in_ch, stage_ch, time_dim))
+            for _ in range(blocks_per_stage - 1):
+                stage.append(ResidualBlock(stage_ch, stage_ch, time_dim))
+            if i < num_downs - 1:
+                stage.append(DownSample(stage_ch))
+            self.downs.append(stage)
+            in_ch = stage_ch
 
         # Middle
-        self.mid_block1 = ResidualBlock(ch * 4, ch * 4, time_dim)
-        self.mid_attn = AttentionBlock(ch * 4)
-        self.mid_block2 = ResidualBlock(ch * 4, ch * 4, time_dim)
+        mid_ch = in_ch
+        self.mid_block1 = ResidualBlock(mid_ch, mid_ch, time_dim)
+        self.mid_attn = AttentionBlock(mid_ch)
+        self.mid_block2 = ResidualBlock(mid_ch, mid_ch, time_dim)
 
-        # Up stages: 7 -> 14 -> 28
-        self.up1_block1 = ResidualBlock(ch * 8, ch * 4, time_dim)
-        self.up1_block2 = ResidualBlock(ch * 4, ch * 4, time_dim)
-
-        self.up2_sample = UpSample(ch * 4)
-        self.up2_block1 = ResidualBlock(ch * 6, ch * 2, time_dim)
-        self.up2_block2 = ResidualBlock(ch * 2, ch * 2, time_dim)
-
-        self.up3_sample = UpSample(ch * 2)
-        self.up3_block1 = ResidualBlock(ch * 3, ch, time_dim)
-        self.up3_block2 = ResidualBlock(ch, ch, time_dim)
+        # Up stages
+        self.ups = nn.ModuleList()
+        for i in reversed(range(num_downs)):
+            stage_ch = ch * (2 ** i)
+            stage = nn.ModuleList()
+            if i < num_downs - 1:
+                # upsample doubles spatial size, keeps channels from previous
+                prev_ch = ch * (2 ** (i + 1))
+                stage.append(UpSample(prev_ch))
+            # First residual block: concat(skip=stage_ch, prev=prev_after_up)
+            block_in = stage_ch + (ch * (2 ** (i + 1)) if i < num_downs - 1 else mid_ch)
+            stage.append(ResidualBlock(block_in, stage_ch, time_dim))
+            for _ in range(blocks_per_stage - 1):
+                stage.append(ResidualBlock(stage_ch, stage_ch, time_dim))
+            self.ups.append(stage)
 
         self.conv_out = nn.Sequential(
             nn.GroupNorm(8, ch),
@@ -146,45 +159,39 @@ class UNet(nn.Module):
         t = self.time_embed(t)
         t = self.time_mlp(t)
 
-        x = self.conv_in(x)                       # (B, 64, 28, 28)
+        x = self.conv_in(x)
+        skips = []
 
-        # Down 1: 28x28
-        x = self.down1_block1(x, t)
-        x = self.down1_block2(x, t)
-        skip1 = x                                 # (B, 64, 28, 28)
-        x = self.down1_sample(x)                  # (B, 64, 14, 14)
+        # Down
+        for stage in self.downs:
+            blocks = list(stage)
+            # Process all blocks; capture skip before the downsample (if present)
+            has_down = isinstance(blocks[-1], DownSample)
+            res_blocks = blocks[:-1] if has_down else blocks
+            for block in res_blocks:
+                x = block(x, t)
+            skips.append(x)
+            if has_down:
+                x = blocks[-1](x)
 
-        # Down 2: 14x14
-        x = self.down2_block1(x, t)
-        x = self.down2_block2(x, t)
-        skip2 = x                                 # (B, 128, 14, 14)
-        x = self.down2_sample(x)                  # (B, 128, 7, 7)
-
-        # Down 3: 7x7
-        x = self.down3_block1(x, t)
-        x = self.down3_block2(x, t)
-        skip3 = x                                 # (B, 256, 7, 7)
-
-        # Middle: 7x7
+        # Middle
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
-        x = self.mid_block2(x, t)                 # (B, 256, 7, 7)
+        x = self.mid_block2(x, t)
 
-        # Up 1: 7x7
-        x = torch.cat([x, skip3], dim=1)          # (B, 512, 7, 7)
-        x = self.up1_block1(x, t)
-        x = self.up1_block2(x, t)                 # (B, 256, 7, 7)
-
-        # Up 2: 14x14
-        x = self.up2_sample(x)                    # (B, 256, 14, 14)
-        x = torch.cat([x, skip2], dim=1)          # (B, 384, 14, 14)
-        x = self.up2_block1(x, t)
-        x = self.up2_block2(x, t)                 # (B, 128, 14, 14)
-
-        # Up 3: 28x28
-        x = self.up3_sample(x)                    # (B, 128, 28, 28)
-        x = torch.cat([x, skip1], dim=1)          # (B, 192, 28, 28)
-        x = self.up3_block1(x, t)
-        x = self.up3_block2(x, t)                 # (B, 64, 28, 28)
+        # Up — each stage consumes one skip on its FIRST ResidualBlock
+        for stage in self.ups:
+            blocks = list(stage)
+            first_residual = True
+            for block in blocks:
+                if isinstance(block, ResidualBlock):
+                    if first_residual:
+                        skip = skips.pop()
+                        x = block(torch.cat([x, skip], dim=1), t)
+                        first_residual = False
+                    else:
+                        x = block(x, t)
+                else:
+                    x = block(x)
 
         return self.conv_out(x)

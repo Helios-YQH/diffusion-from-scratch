@@ -1,12 +1,11 @@
 """Demonstrate the diffusion denoising process using a trained checkpoint.
 
-Shows 4 digits (2x2 grid) evolving from pure noise to final digits in real time,
-then saves the animation as a GIF.
+Supports both MNIST (grayscale 28x28) and CelebA (RGB 64x64).
 
 Usage:
-  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt            # animate + gallery
-  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt --mode animate  # animate only
-  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt --mode gallery --n 64
+  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt                   # MNIST
+  python demo.py --checkpoint checkpoints/ddpm_celeba_best.pt --dataset celeba  # CelebA
+  python demo.py --dataset celeba --mode gallery --n 64
 """
 
 import argparse
@@ -26,12 +25,21 @@ def to_image(tensor):
     return img
 
 
+def show_image(ax, img):
+    """Display an image on an axis, auto-detecting grayscale vs RGB."""
+    if img.shape[0] == 3:
+        ax.imshow(img.permute(1, 2, 0))
+    else:
+        ax.imshow(img[0], cmap="gray")
+
+
 def capture_reverse(diffusion, n_digits=4, capture_interval=10):
     """Run reverse diffusion, yielding (t, x_t) frames at each capture_interval."""
     model = diffusion.model
     model.eval()
 
-    x = torch.randn(n_digits, 1, 28, 28, device=diffusion.device)
+    x = torch.randn(n_digits, diffusion.img_channels, diffusion.img_size,
+                    diffusion.img_size, device=diffusion.device)
     yield (diffusion.T, x.clone())
 
     with torch.no_grad():
@@ -59,6 +67,7 @@ def capture_reverse(diffusion, n_digits=4, capture_interval=10):
 
 def demo_animate(diffusion, capture_interval=10):
     """Live 2x2 animated denoising — popup window + saved GIF."""
+    img_size = diffusion.img_size
 
     print(f"Running {diffusion.T}-step reverse diffusion "
           f"(capturing every {capture_interval} steps)...")
@@ -70,17 +79,23 @@ def demo_animate(diffusion, capture_interval=10):
     for ax in axes:
         ax.axis("off")
 
-    ims = [ax.imshow(np.zeros((28, 28)), cmap="gray", vmin=0, vmax=1, animated=True)
+    dummy = np.zeros((img_size, img_size)) if diffusion.img_channels == 1 else \
+            np.zeros((img_size, img_size, 3))
+    cmap = "gray" if diffusion.img_channels == 1 else None
+    ims = [ax.imshow(dummy, cmap=cmap, vmin=0, vmax=1, animated=True)
            for ax in axes]
     title = fig.suptitle("", fontsize=14)
 
-    # Store current frame index for interactive control
     state = {"idx": 0, "playing": True, "frames": frames}
 
     def show_frame(idx):
         t, x = frames[idx]
         for i in range(4):
-            ims[i].set_array(to_image(x[i])[0].numpy())
+            img = to_image(x[i])
+            if diffusion.img_channels == 3:
+                ims[i].set_data(img.permute(1, 2, 0).numpy())
+            else:
+                ims[i].set_data(img[0].numpy())
         progress = (diffusion.T - t) / diffusion.T
         title.set_text(f"DDPM Denoising Process — t={t:4d}  progress={progress:.0%}")
         state["idx"] = idx
@@ -117,10 +132,8 @@ def demo_animate(diffusion, capture_interval=10):
         state["playing"] = False
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-
-    # Show first frame then auto-play
     show_frame(0)
-    print("\n  Controls: [Space] pause/resume  [←→] step frame  [Home/End] jump ends")
+    print("\n  Controls: [Space] pause/resume  [<- ->] step frame  [Home/End] jump ends")
     print("  Close the window when done.\n")
     plt.ion()
     plt.show()
@@ -128,20 +141,24 @@ def demo_animate(diffusion, capture_interval=10):
     plt.ioff()
     plt.show()
 
-    # Save GIF (close and reopen to avoid animation state issues)
+    # Save GIF
     plt.close("all")
     fig2, axes2 = plt.subplots(2, 2, figsize=(6, 6))
     axes2 = axes2.flatten()
     for ax in axes2:
         ax.axis("off")
-    ims2 = [ax.imshow(np.zeros((28, 28)), cmap="gray", vmin=0, vmax=1, animated=True)
+    ims2 = [ax.imshow(dummy, cmap=cmap, vmin=0, vmax=1, animated=True)
             for ax in axes2]
     title2 = fig2.suptitle("", fontsize=14)
 
     def update(frame_data):
         t, x = frame_data
         for i in range(4):
-            ims2[i].set_array(to_image(x[i])[0].numpy())
+            img = to_image(x[i])
+            if diffusion.img_channels == 3:
+                ims2[i].set_data(img.permute(1, 2, 0).numpy())
+            else:
+                ims2[i].set_data(img[0].numpy())
         progress = (diffusion.T - t) / diffusion.T
         title2.set_text(f"DDPM Denoising — t={t:4d}  progress={progress:.0%}")
         return [*ims2, title2]
@@ -156,11 +173,11 @@ def demo_animate(diffusion, capture_interval=10):
     plt.close(fig2)
     print(f"  Saved {gif_path}")
 
-    # Save final frame as PNG
+    # Save final frame
     t_final, x_final = frames[-1]
     fig3, axes3 = plt.subplots(2, 2, figsize=(4, 4))
     for i, ax in enumerate(axes3.flat):
-        ax.imshow(to_image(x_final[i])[0], cmap="gray")
+        show_image(ax, to_image(x_final[i]))
         ax.axis("off")
     fig3.suptitle("Generated Digits", fontsize=14)
     plt.tight_layout()
@@ -171,8 +188,8 @@ def demo_animate(diffusion, capture_interval=10):
 
 
 def demo_gallery(diffusion, n_digits=64, nrow=8):
-    """Generate a gallery of digits."""
-    print(f"Generating gallery of {n_digits} digits...")
+    """Generate a gallery of digits/faces."""
+    print(f"Generating gallery of {n_digits} images...")
     samples = diffusion.sample(n_digits)
 
     ncol = max(1, n_digits // nrow)
@@ -185,10 +202,10 @@ def demo_gallery(diffusion, n_digits=64, nrow=8):
         axes = axes[None, :]
     for i, ax in enumerate(axes.flat):
         if i < n_digits:
-            ax.imshow(to_image(samples[i])[0], cmap="gray")
+            show_image(ax, to_image(samples[i]))
         ax.axis("off")
 
-    fig.suptitle(f"DDPM Generated MNIST Digits ({n_digits} samples)", fontsize=14, y=1.02)
+    fig.suptitle(f"DDPM Generated Images ({n_digits} samples)", fontsize=14, y=1.02)
     plt.tight_layout()
     path = os.path.join("samples", "demo_gallery.png")
     os.makedirs("samples", exist_ok=True)
@@ -198,31 +215,38 @@ def demo_gallery(diffusion, n_digits=64, nrow=8):
 
 
 def main():
-    parser = argparse.ArgumentParser("DDPM Demo — visualize the diffusion process")
+    parser = argparse.ArgumentParser("DDPM Demo")
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--dataset", choices=["mnist", "celeba"], default="mnist")
     parser.add_argument("--mode", choices=["all", "animate", "gallery"], default="all")
-    parser.add_argument("--n", type=int, default=64,
-                        help="Number of digits for gallery")
-    parser.add_argument("--capture-interval", type=int, default=10,
-                        help="Diffusion steps between animation frames (default: 10)")
+    parser.add_argument("--n", type=int, default=64)
+    parser.add_argument("--capture-interval", type=int, default=10)
     args = parser.parse_args()
+
+    if args.dataset == "celeba":
+        img_channels, img_size, base_channels = 3, 64, 128
+    else:
+        img_channels, img_size, base_channels = 1, 28, 64
 
     ckpt = args.checkpoint
     if ckpt is None:
         ckpt_dir = "checkpoints"
         ckpt = os.path.join(ckpt_dir, sorted(os.listdir(ckpt_dir))[-1])
     print(f"Checkpoint: {ckpt}")
+    print(f"Dataset: {args.dataset}  ({img_channels}ch, {img_size}x{img_size})")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    model = UNet()
+    model = UNet(img_channels=img_channels, base_channels=base_channels,
+                 time_dim=256, num_downs=3)
     state = torch.load(ckpt, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
 
-    diffusion = DDPM(model, T=1000, device=device)
+    diffusion = DDPM(model, T=1000, device=device,
+                     img_channels=img_channels, img_size=img_size)
 
     if args.mode in ("all", "animate"):
         demo_animate(diffusion, capture_interval=args.capture_interval)

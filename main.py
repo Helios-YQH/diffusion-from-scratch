@@ -1,21 +1,21 @@
 """
-DDPM Diffusion Model for MNIST Handwritten Digit Generation.
+DDPM Diffusion Model — supports MNIST (grayscale 28x28) and CelebA (RGB 64x64).
 
 Usage:
-  # Train on CPU (auto-detect)
-  python main.py train --epochs 50 --batch-size 128
+  # MNIST training (default)
+  python main.py train --dataset mnist --epochs 50 --batch-size 128
 
-  # Train on 6 GPUs with DataParallel
-  python main.py train --epochs 50 --batch-size 128 --gpus 0,1,2,3,4,5
+  # CelebA training (RGB 64x64 faces)
+  python main.py train --dataset celeba --epochs 200 --batch-size 128
 
-  # Train on all available GPUs (default)
-  python main.py train --epochs 50 --batch-size 128
+  # CelebA with 6 GPUs
+  python main.py train --dataset celeba --epochs 200 --batch-size 128 --gpus 0,1,2,3,4,5
 
-  # Sample from a trained checkpoint (latest in checkpoints/ by default)
-  python main.py sample --checkpoint checkpoints/ddpm_epoch50.pt --n 64
+  # Sample MNIST
+  python main.py sample --dataset mnist --checkpoint checkpoints/ddpm_epoch50.pt --n 64
 
-  # Sample with auto-detect latest checkpoint
-  python main.py sample --n 16
+  # Sample CelebA
+  python main.py sample --dataset celeba --checkpoint checkpoints/ddpm_celeba_best.pt --n 64
 """
 
 import argparse
@@ -25,12 +25,13 @@ import torch.nn as nn
 
 from model import UNet
 from diffusion import DDPM
-from train import train, load_mnist, save_sample_grid
+from train import train, save_sample_grid
 
 
 def main():
-    parser = argparse.ArgumentParser("DDPM MNIST")
-    parser.add_argument("mode", choices=["train", "sample"], help="train or sample")
+    parser = argparse.ArgumentParser("DDPM")
+    parser.add_argument("mode", choices=["train", "sample"])
+    parser.add_argument("--dataset", choices=["mnist", "celeba"], default="mnist")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -38,9 +39,24 @@ def main():
     parser.add_argument("--n", type=int, default=16, help="number of images to sample")
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--timesteps", type=int, default=1000)
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="Image size (default: 28 for mnist, 64 for celeba)")
+    parser.add_argument("--base-channels", type=int, default=None,
+                        help="Base channels (default: 64 for mnist, 128 for celeba)")
     parser.add_argument("--gpus", type=str, default=None,
-                        help="GPU ids to use, e.g. '0,1,2,3,4,5'. Default: all available")
+                        help="GPU ids, e.g. '0,1,2,3,4,5'. Default: all available")
     args = parser.parse_args()
+
+    if args.dataset == "celeba":
+        img_channels = 3
+        img_size = args.image_size or 64
+        base_channels = args.base_channels or 128
+        num_downs = 3  # 64→32→16→8
+    else:
+        img_channels = 1
+        img_size = args.image_size or 28
+        base_channels = args.base_channels or 64
+        num_downs = 3  # 28→14→7
 
     if torch.cuda.is_available():
         if args.gpus is not None:
@@ -52,9 +68,10 @@ def main():
     else:
         gpu_ids = []
         device = "cpu"
-        print("Device: cpu")
+        print(f"Device: cpu")
 
-    model = UNet(img_channels=1, base_channels=64, time_dim=256)
+    model = UNet(img_channels=img_channels, base_channels=base_channels,
+                 time_dim=256, num_downs=num_downs)
 
     use_data_parallel = len(gpu_ids) > 1
     if use_data_parallel:
@@ -65,12 +82,15 @@ def main():
     else:
         batch_size = args.batch_size
 
-    diffusion = DDPM(model, T=args.timesteps, device=device, use_data_parallel=use_data_parallel)
+    diffusion = DDPM(model, T=args.timesteps, device=device,
+                     use_data_parallel=use_data_parallel,
+                     img_channels=img_channels, img_size=img_size)
 
     if args.mode == "train":
         train(diffusion, epochs=args.epochs, batch_size=batch_size,
               lr=args.lr, save_interval=args.save_interval,
-              use_data_parallel=use_data_parallel)
+              use_data_parallel=use_data_parallel,
+              dataset_type=args.dataset, image_size=img_size)
 
     elif args.mode == "sample":
         ckpt = args.checkpoint
@@ -85,12 +105,12 @@ def main():
         samples, steps = diffusion.sample(args.n, return_all=True)
 
         os.makedirs("samples", exist_ok=True)
-        save_sample_grid(samples, os.path.join("samples", "generated.png"))
-        print(f"Saved generated.png")
+        save_sample_grid(samples, os.path.join("samples", f"generated_{args.dataset}.png"))
+        print(f"Saved generated_{args.dataset}.png")
 
-        # Also save intermediate steps
         if steps and len(steps) > 1:
             import matplotlib.pyplot as plt
+            is_rgb = img_channels == 3
             fig, axes = plt.subplots(2, 5, figsize=(12, 5))
             idxs = [0, len(steps) // 8, len(steps) // 4, len(steps) // 2,
                     len(steps) - 1] if len(steps) > 5 else range(len(steps))
@@ -98,17 +118,20 @@ def main():
                 if idx < len(steps):
                     r, c = i // 5, i % 5
                     img = (steps[idx][0].cpu() * 0.5 + 0.5).clamp(0, 1)
-                    axes[r, c].imshow(img[0], cmap="gray")
-                    t = args.timesteps - 1 - (idx * (args.timesteps // max(1, len(steps) - 1)))
-                    axes[r, c].set_title(f"t={t}")
+                    if is_rgb:
+                        axes[r, c].imshow(img.permute(1, 2, 0))
+                    else:
+                        axes[r, c].imshow(img[0], cmap="gray")
+                    t_val = args.timesteps - 1 - (idx * (args.timesteps // max(1, len(steps) - 1)))
+                    axes[r, c].set_title(f"t={t_val}")
                     axes[r, c].axis("off")
             for i in range(len(idxs), 10):
                 r, c = i // 5, i % 5
                 axes[r, c].axis("off")
             plt.tight_layout()
-            plt.savefig(os.path.join("samples", "diffusion_steps.png"), dpi=100)
+            plt.savefig(os.path.join("samples", f"diffusion_steps_{args.dataset}.png"), dpi=100)
             plt.close()
-            print(f"Saved diffusion_steps.png")
+            print(f"Saved diffusion_steps_{args.dataset}.png")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,14 @@
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 
 class DDPM:
     def __init__(self, model, T=1000, beta_start=1e-4, beta_end=0.02, device="cpu",
-                 use_data_parallel=False):
+                 use_data_parallel=False, img_channels=1, img_size=28):
         self.model = model.to(device)
         self.use_data_parallel = use_data_parallel
+        self.img_channels = img_channels
+        self.img_size = img_size
         self.T = T
         self.device = device
 
@@ -38,7 +39,8 @@ class DDPM:
     @torch.no_grad()
     def sample(self, n, return_all=False):
         self.model.eval()
-        x = torch.randn(n, 1, 28, 28, device=self.device)
+        x = torch.randn(n, self.img_channels, self.img_size, self.img_size,
+                        device=self.device)
         steps = []
 
         for t in reversed(range(self.T)):
