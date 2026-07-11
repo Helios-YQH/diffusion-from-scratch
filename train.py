@@ -32,9 +32,10 @@ class CelebADataset(Dataset):
     """Streams images directly from a zip file — no unzip needed."""
 
     def __init__(self, zip_path, image_size=64, normalize=True):
-        self.zf = zipfile.ZipFile(zip_path)
-        self.files = [f for f in self.zf.namelist()
-                      if f.endswith((".jpg", ".jpeg", ".png"))]
+        self.zip_path = zip_path
+        with zipfile.ZipFile(zip_path) as zf:
+            self.files = [f for f in zf.namelist()
+                          if f.endswith((".jpg", ".jpeg", ".png"))]
         self.image_size = image_size
         self.normalize = normalize
 
@@ -42,7 +43,8 @@ class CelebADataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        data = self.zf.read(self.files[idx])
+        with zipfile.ZipFile(self.zip_path) as zf:
+            data = zf.read(self.files[idx])
         img = Image.open(io.BytesIO(data)).convert("RGB")
         img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
         img = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
@@ -89,8 +91,7 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
         ckpt_name = None
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                        pin_memory=use_data_parallel,
-                        num_workers=2 if dataset_type == "celeba" else 0)
+                        pin_memory=use_data_parallel)
 
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=lr)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
