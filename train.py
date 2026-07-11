@@ -2,8 +2,8 @@ import gzip
 import pickle
 import os
 import zipfile
-import io
 import warnings
+import glob
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 import matplotlib.pyplot as plt
@@ -13,7 +13,29 @@ from tqdm import tqdm
 
 DATA_PATH = os.path.join("data", "mnist", "mnist.pkl.gz")
 CELEBA_PATH = os.path.join("data", "celeba.zip")
+CELEBA_DIR = os.path.join("data", "celeba")
 CHECKPOINT_DIR = "checkpoints"
+
+
+def extract_celeba():
+    """Extract CelebA zip to data/celeba/ once. Skips if already done."""
+    done_marker = os.path.join(CELEBA_DIR, ".extracted")
+    if os.path.exists(done_marker):
+        return
+
+    os.makedirs(CELEBA_DIR, exist_ok=True)
+    with zipfile.ZipFile(CELEBA_PATH) as zf:
+        members = [m for m in zf.infolist()
+                   if m.filename.endswith((".jpg", ".jpeg", ".png"))]
+        print(f"Extracting {len(members)} images from celeba.zip "
+              f"to {CELEBA_DIR}/ ...")
+        for m in tqdm(members, desc="Extracting", ncols=80):
+            zf.extract(m, CELEBA_DIR)
+
+    # Write marker to skip extraction next time
+    with open(done_marker, "w") as f:
+        f.write("done")
+    print("Extraction complete.")
 
 
 def load_mnist(normalize=True):
@@ -29,13 +51,15 @@ def load_mnist(normalize=True):
 
 
 class CelebADataset(Dataset):
-    """Streams images directly from a zip file — no unzip needed."""
+    """Reads pre-extracted CelebA images from disk."""
 
-    def __init__(self, zip_path, image_size=64, normalize=True):
-        self.zip_path = zip_path
-        with zipfile.ZipFile(zip_path) as zf:
-            self.files = [f for f in zf.namelist()
-                          if f.endswith((".jpg", ".jpeg", ".png"))]
+    def __init__(self, image_dir, image_size=64, normalize=True):
+        self.files = sorted(glob.glob(os.path.join(image_dir, "**", "*.jpg"),
+                                      recursive=True))
+        if not self.files:
+            raise RuntimeError(
+                f"No .jpg files found in {image_dir}. "
+                f"Did you run extract_celeba() first?")
         self.image_size = image_size
         self.normalize = normalize
 
@@ -43,9 +67,7 @@ class CelebADataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        with zipfile.ZipFile(self.zip_path) as zf:
-            data = zf.read(self.files[idx])
-        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img = Image.open(self.files[idx]).convert("RGB")
         img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
         img = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
         img = img.transpose(2, 0, 1)  # HWC -> CHW
@@ -79,19 +101,22 @@ def save_sample_grid(images, path, nrow=4):
 def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
           use_data_parallel=False, dataset_type="mnist", image_size=64):
     if dataset_type == "celeba":
-        dataset = CelebADataset(CELEBA_PATH, image_size=image_size)
-        sample_interval = 50  # much less frequent for larger dataset
-        save_best_only = True
+        extract_celeba()
+        dataset = CelebADataset(CELEBA_DIR, image_size=image_size)
+        sample_interval = 50
+        num_workers = 4
         ckpt_name = "ddpm_celeba_best.pt"
+        save_best_only = True
     else:
         x_train = load_mnist()
         dataset = TensorDataset(x_train)
         sample_interval = save_interval
-        save_best_only = False
+        num_workers = 0
         ckpt_name = None
+        save_best_only = False
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                        pin_memory=use_data_parallel)
+                        pin_memory=use_data_parallel, num_workers=num_workers)
 
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=lr)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
