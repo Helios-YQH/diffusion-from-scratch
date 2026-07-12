@@ -224,7 +224,7 @@ def main():
     args = parser.parse_args()
 
     if args.dataset == "celeba":
-        img_channels, img_size, base_channels = 3, 32, 64
+        img_channels, img_size, base_channels = 3, 64, 64
     else:
         img_channels, img_size, base_channels = 1, 28, 64
 

@@ -21,18 +21,18 @@ x_train = load_mnist()
 assert x_train.shape == (50000, 1, 28, 28)
 print("   OK")
 
-print("\n2. CelebA model (3ch, 32x32, base_ch=64)")
-model_c = UNet(img_channels=3, base_channels=64, num_downs=3)
-x_c = torch.randn(2, 3, 32, 32)
+print("\n2. CelebA model (3ch, 64x64, base_ch=64, num_downs=4)")
+model_c = UNet(img_channels=3, base_channels=64, num_downs=4)
+x_c = torch.randn(2, 3, 64, 64)
 out_c = model_c(x_c, t)
 n_c = sum(p.numel() for p in model_c.parameters()) / 1e6
 print(f"   {x_c.shape} -> {out_c.shape}  params={n_c:.1f}M")
-assert out_c.shape == (2, 3, 32, 32)
+assert out_c.shape == (2, 3, 64, 64)
 
-diffusion_c = DDPM(model_c, T=100, device="cpu", img_channels=3, img_size=32)
+diffusion_c = DDPM(model_c, T=100, device="cpu", img_channels=3, img_size=64)
 loss_c = diffusion_c.training_loss(x_c)
 print(f"   loss={loss_c.item():.4f}")
-assert diffusion_c.sample(4).shape == (4, 3, 32, 32)
+assert diffusion_c.sample(4).shape == (4, 3, 64, 64)
 print("   OK")
 
 print("\n3. num_downs configurability")
@@ -76,9 +76,9 @@ assert os.path.exists(os.path.join(tr.CELEBA_DIR, ".extracted"))
 # Test preprocess cache
 cache = os.path.join(tmpdir, "celeba_32.pt")
 orig_cache_path = tr.preprocess_celeba.__code__
-data = tr.preprocess_celeba(image_size=32)
+data = tr.preprocess_celeba(image_size=64)
 print(f"   preprocessed: {data.shape}")
-assert data.shape[1:] == (3, 32, 32)
+assert data.shape[1:] == (3, 64, 64)
 assert data.shape[0] == 2
 
 # Test that cache is reused (no reprocessing)
