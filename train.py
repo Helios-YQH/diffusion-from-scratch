@@ -109,7 +109,7 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
         data_tensor = preprocess_celeba(image_size=image_size)
         dataset = TensorDataset(data_tensor)
         sample_interval = 50
-        num_workers = 0
+        num_workers = 4
         ckpt_name = "ddpm_celeba_best.pt"
     else:
         x_train = load_mnist()
