@@ -75,6 +75,11 @@ def main():
 
     use_data_parallel = len(gpu_ids) > 1
     if use_data_parallel:
+        import torch.multiprocessing as mp
+        try:
+            mp.set_start_method('spawn')
+        except RuntimeError:
+            pass  # already set
         model = nn.DataParallel(model, device_ids=gpu_ids)
         per_gpu_batch = args.batch_size
         batch_size = args.batch_size * len(gpu_ids)
