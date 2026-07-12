@@ -1,11 +1,11 @@
 """
-DDPM Diffusion Model — supports MNIST (grayscale 28x28) and CelebA (RGB 64x64).
+DDPM Diffusion Model — supports MNIST (grayscale 28x28) and CelebA (RGB 32x32).
 
 Usage:
   # MNIST training (default)
   python main.py train --dataset mnist --epochs 50 --batch-size 128
 
-  # CelebA training (RGB 64x64 faces)
+  # CelebA training (RGB 32x32 faces)
   python main.py train --dataset celeba --epochs 200 --batch-size 128
 
   # CelebA with 6 GPUs
@@ -40,18 +40,18 @@ def main():
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--timesteps", type=int, default=1000)
     parser.add_argument("--image-size", type=int, default=None,
-                        help="Image size (default: 28 for mnist, 64 for celeba)")
+                        help="Image size (default: 28 for mnist, 32 for celeba)")
     parser.add_argument("--base-channels", type=int, default=None,
-                        help="Base channels (default: 64 for mnist, 128 for celeba)")
+                        help="Base channels (default: 64 for mnist, 64 for celeba)")
     parser.add_argument("--gpus", type=str, default=None,
                         help="GPU ids, e.g. '0,1,2,3,4,5'. Default: all available")
     args = parser.parse_args()
 
     if args.dataset == "celeba":
         img_channels = 3
-        img_size = args.image_size or 64
-        base_channels = args.base_channels or 128
-        num_downs = 3  # 64→32→16→8
+        img_size = args.image_size or 32
+        base_channels = args.base_channels or 64
+        num_downs = 3  # 32→16→8
     else:
         img_channels = 1
         img_size = args.image_size or 28

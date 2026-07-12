@@ -32,10 +32,40 @@ def extract_celeba():
         for m in tqdm(members, desc="Extracting", ncols=80):
             zf.extract(m, CELEBA_DIR)
 
-    # Write marker to skip extraction next time
     with open(done_marker, "w") as f:
         f.write("done")
     print("Extraction complete.")
+
+
+def preprocess_celeba(image_size=32):
+    """Resize + normalize all CelebA images into a single .pt file.
+    Skips if cache already exists. 202K × 3 × 32 × 32 ≈ 2.4 GB in float32.
+    """
+    cache_path = os.path.join("data", f"celeba_{image_size}.pt")
+    if os.path.exists(cache_path):
+        print(f"Loading preprocessed cache: {cache_path}")
+        return torch.load(cache_path, weights_only=True)
+
+    files = sorted(glob.glob(os.path.join(CELEBA_DIR, "**", "*.jpg"),
+                             recursive=True))
+    if not files:
+        raise RuntimeError(
+            f"No .jpg files found in {CELEBA_DIR}. "
+            f"Did you run extract_celeba() first?")
+
+    print(f"Preprocessing {len(files)} images to {image_size}×{image_size}...")
+    tensors = []
+    for f in tqdm(files, desc="Preprocessing", ncols=80):
+        img = Image.open(f).convert("RGB")
+        img = img.resize((image_size, image_size), Image.BILINEAR)
+        arr = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
+        arr = arr * 2.0 - 1.0  # [-1, 1]
+        tensors.append(torch.from_numpy(arr.transpose(2, 0, 1)))
+
+    data = torch.stack(tensors)
+    torch.save(data, cache_path)
+    print(f"Saved {cache_path}  ({data.shape})")
+    return data
 
 
 def load_mnist(normalize=True):
@@ -48,32 +78,6 @@ def load_mnist(normalize=True):
     if normalize:
         x_train = x_train * 2.0 - 1.0  # [0,1] -> [-1,1]
     return torch.from_numpy(x_train)
-
-
-class CelebADataset(Dataset):
-    """Reads pre-extracted CelebA images from disk."""
-
-    def __init__(self, image_dir, image_size=64, normalize=True):
-        self.files = sorted(glob.glob(os.path.join(image_dir, "**", "*.jpg"),
-                                      recursive=True))
-        if not self.files:
-            raise RuntimeError(
-                f"No .jpg files found in {image_dir}. "
-                f"Did you run extract_celeba() first?")
-        self.image_size = image_size
-        self.normalize = normalize
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, idx):
-        img = Image.open(self.files[idx]).convert("RGB")
-        img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
-        img = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
-        img = img.transpose(2, 0, 1)  # HWC -> CHW
-        if self.normalize:
-            img = img * 2.0 - 1.0  # [0,1] -> [-1,1]
-        return torch.from_numpy(img)
 
 
 def save_sample_grid(images, path, nrow=4):
@@ -99,21 +103,20 @@ def save_sample_grid(images, path, nrow=4):
 
 
 def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
-          use_data_parallel=False, dataset_type="mnist", image_size=64):
+          use_data_parallel=False, dataset_type="mnist", image_size=32):
     if dataset_type == "celeba":
         extract_celeba()
-        dataset = CelebADataset(CELEBA_DIR, image_size=image_size)
+        data_tensor = preprocess_celeba(image_size=image_size)
+        dataset = TensorDataset(data_tensor)
         sample_interval = 50
         num_workers = 4
         ckpt_name = "ddpm_celeba_best.pt"
-        save_best_only = True
     else:
         x_train = load_mnist()
         dataset = TensorDataset(x_train)
         sample_interval = save_interval
         num_workers = 0
         ckpt_name = None
-        save_best_only = False
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         pin_memory=use_data_parallel, num_workers=num_workers)
@@ -131,10 +134,7 @@ def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
         num_batches = 0
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", ncols=80)
         for batch in pbar:
-            if dataset_type == "celeba":
-                x0 = batch.to(diffusion.device)
-            else:
-                x0 = batch[0].to(diffusion.device)
+            x0 = batch[0].to(diffusion.device)
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
