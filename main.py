@@ -47,6 +47,12 @@ def main():
                         help="GPU ids, e.g. '0,1,2,3,4,5'. Default: all available")
     args = parser.parse_args()
 
+    # Limit visible GPUs BEFORE any torch.cuda call.
+    # This prevents GroupNorm's CUDA kernel from deadlocking under
+    # DataParallel when the driver can see extra GPUs (PyTorch 2.13 + CUDA 12.6).
+    if args.gpus is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
+
     if args.dataset == "celeba":
         img_channels = 3
         img_size = args.image_size or 64
@@ -59,10 +65,7 @@ def main():
         num_downs = 3  # 28→14→7
 
     if torch.cuda.is_available():
-        if args.gpus is not None:
-            gpu_ids = [int(x) for x in args.gpus.split(",")]
-        else:
-            gpu_ids = list(range(torch.cuda.device_count()))
+        gpu_ids = list(range(torch.cuda.device_count()))
         device = f"cuda:{gpu_ids[0]}"
         print(f"Using {len(gpu_ids)} GPUs: {gpu_ids}")
     else:
@@ -75,11 +78,6 @@ def main():
 
     use_data_parallel = len(gpu_ids) > 1
     if use_data_parallel:
-        import torch.multiprocessing as mp
-        try:
-            mp.set_start_method('spawn')
-        except RuntimeError:
-            pass  # already set
         model = nn.DataParallel(model, device_ids=gpu_ids)
         per_gpu_batch = args.batch_size
         batch_size = args.batch_size * len(gpu_ids)
