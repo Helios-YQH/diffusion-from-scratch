@@ -30,7 +30,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Per-GPU batch size")
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--warmup-steps", type=int, default=1000,
+                        help="Linear LR warmup steps")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--n", type=int, default=16, help="number of images to sample")
     parser.add_argument("--save-interval", type=int, default=10)

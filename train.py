@@ -7,6 +7,7 @@ import glob
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
 import matplotlib.pyplot as plt
 import numpy as np
@@ -141,7 +142,7 @@ def train(args):
     # ── Dataset ─────────────────────────────────────────────────────
     if args.dataset == 'celeba':
         img_channels, img_size = 3, args.image_size or 64
-        base_channels, num_downs = args.base_channels or 64, 4
+        base_channels, num_downs = args.base_channels or 128, 4
         sample_interval = 50
         num_workers = 4
         ckpt_name = 'ddpm_celeba_best.pt'
@@ -181,6 +182,22 @@ def train(args):
 
     # ── Optimizer ───────────────────────────────────────────────────
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=args.lr)
+
+    # ── LR scheduler: linear warmup → cosine decay ─────────────────
+    steps_per_epoch = len(loader)
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = min(args.warmup_steps, total_steps // 2)
+
+    warmup = LinearLR(opt, start_factor=0.01, end_factor=1.0,
+                      total_iters=warmup_steps)
+    cosine = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps,
+                               eta_min=1e-6)
+    scheduler = SequentialLR(opt, schedulers=[warmup, cosine],
+                             milestones=[warmup_steps])
+
+    if is_main:
+        print(f"LR: {args.lr}  warmup: {warmup_steps} steps  "
+              f"cosine decay to 1e-6 over {total_steps - warmup_steps} steps")
     model_for_save = model.module if is_distributed else model
     best_loss = float('inf')
 
@@ -204,6 +221,7 @@ def train(args):
             opt.zero_grad()
             loss.backward()
             opt.step()
+            scheduler.step()
             total_loss += loss.item()
             num_batches += 1
             if is_main:
