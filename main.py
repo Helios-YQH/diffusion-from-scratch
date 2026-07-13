@@ -1,15 +1,16 @@
 """
 DDPM Diffusion Model — supports MNIST (grayscale 28x28) and CelebA (RGB 64x64).
+Uses DistributedDataParallel (DDP) for multi-GPU training.
 
 Usage:
-  # MNIST training (default)
+  # MNIST single GPU (default)
   python main.py train --dataset mnist --epochs 50 --batch-size 256
 
-  # CelebA training (RGB 64x64 faces)
-  python main.py train --dataset celeba --epochs 200 --batch-size 256
+  # MNIST 2 GPUs (DDP)
+  CUDA_VISIBLE_DEVICES=0,1 python main.py train --dataset mnist --gpus 2
 
-  # CelebA with 5 GPUs (DataParallel)
-  python main.py train --dataset celeba --epochs 200 --batch-size 256 --gpus 0,1,2,3,4
+  # CelebA 5 GPUs (DDP)
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4 python main.py train --dataset celeba --epochs 200 --batch-size 256 --gpus 5
 
   # Sample MNIST
   python main.py sample --dataset mnist --checkpoint checkpoints/ddpm_epoch50.pt --n 64
@@ -21,11 +22,9 @@ Usage:
 import argparse
 import os
 import torch
-import torch.nn as nn
+import torch.multiprocessing as mp
 
-from model import UNet
-from diffusion import DDPM
-from train import train, save_sample_grid
+from train import train_worker
 
 
 def main():
@@ -43,67 +42,44 @@ def main():
                         help="Image size (default: 28 for mnist, 64 for celeba)")
     parser.add_argument("--base-channels", type=int, default=None,
                         help="Base channels (default: 64)")
-    parser.add_argument("--gpus", type=str, default=None,
-                        help="GPU ids, e.g. '0,1,2,3,4,5'. Default: all available")
+    parser.add_argument("--gpus", type=int, default=1,
+                        help="Number of GPUs to use (DDP). Select GPUs via CUDA_VISIBLE_DEVICES.")
     args = parser.parse_args()
 
-    # Limit visible GPUs BEFORE any torch.cuda call.
-    # This prevents GroupNorm's CUDA kernel from deadlocking under
-    # DataParallel when the driver can see extra GPUs (PyTorch 2.13 + CUDA 12.6).
-    if args.gpus is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
-
-    if args.dataset == "celeba":
-        img_channels = 3
-        img_size = args.image_size or 64
-        base_channels = args.base_channels or 64
-        num_downs = 4  # 64→32→16→8 bottleneck
-    else:
-        img_channels = 1
-        img_size = args.image_size or 28
-        base_channels = args.base_channels or 64
-        num_downs = 3  # 28→14→7
-
-    if torch.cuda.is_available():
-        gpu_ids = list(range(torch.cuda.device_count()))
-        device = f"cuda:{gpu_ids[0]}"
-        print(f"Using {len(gpu_ids)} GPUs: {gpu_ids}")
-    else:
-        gpu_ids = []
-        device = "cpu"
-        print(f"Device: cpu")
-
-    model = UNet(img_channels=img_channels, base_channels=base_channels,
-                 time_dim=256, num_downs=num_downs)
-
-    use_data_parallel = len(gpu_ids) > 1
-    if use_data_parallel:
-        model = nn.DataParallel(model, device_ids=gpu_ids)
-        per_gpu_batch = args.batch_size
-        batch_size = args.batch_size * len(gpu_ids)
-        print(f"DataParallel mode: per-GPU batch={per_gpu_batch}, total batch={batch_size}")
-    else:
-        batch_size = args.batch_size
-
-    diffusion = DDPM(model, T=args.timesteps, device=device,
-                     use_data_parallel=use_data_parallel,
-                     img_channels=img_channels, img_size=img_size)
-
     if args.mode == "train":
-        train(diffusion, epochs=args.epochs, batch_size=batch_size,
-              lr=args.lr, save_interval=args.save_interval,
-              use_data_parallel=use_data_parallel,
-              dataset_type=args.dataset, image_size=img_size)
+        ngpus = args.gpus if torch.cuda.is_available() else 1
+        if ngpus > 1:
+            mp.spawn(train_worker, args=(ngpus, args), nprocs=ngpus)
+        else:
+            train_worker(0, 1, args)
 
     elif args.mode == "sample":
+        if args.dataset == "celeba":
+            img_channels, img_size = 3, args.image_size or 64
+            base_channels = args.base_channels or 64
+        else:
+            img_channels, img_size = 1, args.image_size or 28
+            base_channels = args.base_channels or 64
+
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        from model import UNet
+        from diffusion import DDPM
+        from train import save_sample_grid
+
         ckpt = args.checkpoint
         if ckpt is None:
             ckpt = os.path.join("checkpoints", sorted(os.listdir("checkpoints"))[-1])
         print(f"Loading checkpoint: {ckpt}")
         state = torch.load(ckpt, map_location=device, weights_only=True)
-        base_model = model.module if use_data_parallel else model
-        base_model.load_state_dict(state)
-        base_model.to(device)
+
+        model = UNet(img_channels=img_channels, base_channels=base_channels,
+                     time_dim=256, num_downs=4 if args.dataset == "celeba" else 3)
+        model.load_state_dict(state)
+        model.to(device)
+
+        diffusion = DDPM(model, T=args.timesteps, device=device,
+                         img_channels=img_channels, img_size=img_size)
 
         samples, steps = diffusion.sample(args.n, return_all=True)
 

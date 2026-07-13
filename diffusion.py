@@ -4,9 +4,8 @@ import torch.nn.functional as F
 
 class DDPM:
     def __init__(self, model, T=1000, beta_start=1e-4, beta_end=0.02, device="cpu",
-                 use_data_parallel=False, img_channels=1, img_size=28):
-        self.model = model.to(device)
-        self.use_data_parallel = use_data_parallel
+                 img_channels=1, img_size=28):
+        self.model = model
         self.img_channels = img_channels
         self.img_size = img_size
         self.T = T

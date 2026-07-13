@@ -5,11 +5,17 @@ import zipfile
 import warnings
 import glob
 import torch
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+import torch.distributed as dist
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Dataset, TensorDataset, DistributedSampler
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+
+from model import UNet
+from diffusion import DDPM
 
 DATA_PATH = os.path.join("data", "mnist", "mnist.pkl.gz")
 CELEBA_PATH = os.path.join("data", "celeba.zip")
@@ -38,9 +44,7 @@ def extract_celeba():
 
 
 def preprocess_celeba(image_size=32):
-    """Resize + normalize all CelebA images into a single .pt file.
-    Skips if cache already exists. 202K × 3 × 32 × 32 ≈ 2.4 GB in float32.
-    """
+    """Resize + normalize all CelebA images into a single .pt file."""
     cache_path = os.path.join("data", f"celeba_{image_size}.pt")
     if os.path.exists(cache_path):
         print(f"Loading preprocessed cache: {cache_path}")
@@ -53,7 +57,7 @@ def preprocess_celeba(image_size=32):
             f"No .jpg files found in {CELEBA_DIR}. "
             f"Did you run extract_celeba() first?")
 
-    print(f"Preprocessing {len(files)} images to {image_size}×{image_size}...")
+    print(f"Preprocessing {len(files)} images to {image_size}x{image_size}...")
     tensors = []
     for f in tqdm(files, desc="Preprocessing", ncols=80):
         img = Image.open(f).convert("RGB")
@@ -102,72 +106,123 @@ def save_sample_grid(images, path, nrow=4):
     plt.close()
 
 
-def train(diffusion, epochs=50, batch_size=128, lr=1e-3, save_interval=10,
-          use_data_parallel=False, dataset_type="mnist", image_size=32):
-    if dataset_type == "celeba":
-        extract_celeba()
-        data_tensor = preprocess_celeba(image_size=image_size)
-        dataset = TensorDataset(data_tensor)
+def train_worker(rank, world_size, args):
+    """Entry point for DDP spawn. rank=0, world_size=1 = single GPU."""
+    is_distributed = world_size > 1
+
+    if is_distributed:
+        os.environ.setdefault('MASTER_ADDR', '127.0.0.1')
+        os.environ.setdefault('MASTER_PORT', '29500')
+        dist.init_process_group('nccl', rank=rank, world_size=world_size)
+        torch.cuda.set_device(rank)
+        device = f'cuda:{rank}'
+    else:
+        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        if device != 'cpu':
+            torch.cuda.set_device(device)
+
+    # ── Dataset ──
+    if args.dataset == 'celeba':
+        img_channels, img_size = 3, args.image_size or 64
+        base_channels, num_downs = args.base_channels or 64, 4
         sample_interval = 50
         num_workers = 4
-        ckpt_name = "ddpm_celeba_best.pt"
+        ckpt_name = 'ddpm_celeba_best.pt'
+        extract_celeba()
+        data_tensor = preprocess_celeba(image_size=img_size)
+        dataset = TensorDataset(data_tensor)
     else:
-        x_train = load_mnist()
-        dataset = TensorDataset(x_train)
-        sample_interval = save_interval
+        img_channels, img_size = 1, args.image_size or 28
+        base_channels, num_downs = args.base_channels or 64, 3
+        sample_interval = args.save_interval
         num_workers = 0
         ckpt_name = None
+        x_train = load_mnist()
+        dataset = TensorDataset(x_train)
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                        pin_memory=use_data_parallel, num_workers=num_workers)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,
+                                 shuffle=True) if is_distributed else None
+    loader = DataLoader(dataset, batch_size=args.batch_size,
+                        shuffle=(sampler is None),
+                        sampler=sampler,
+                        pin_memory=True, num_workers=num_workers)
 
-    opt = torch.optim.Adam(diffusion.model.parameters(), lr=lr)
+    if rank == 0:
+        total_bs = args.batch_size * world_size
+        print(f"DDP mode: {world_size} GPU{'s' if world_size>1 else ''}, "
+              f"per-GPU batch={args.batch_size}, total batch={total_bs}")
+
+    # ── Model ──
+    model = UNet(img_channels=img_channels, base_channels=base_channels,
+                 time_dim=256, num_downs=num_downs).to(device)
+    if is_distributed:
+        model = DDP(model, device_ids=[rank])
+
+    diffusion = DDPM(model, T=args.timesteps, device=device,
+                     img_channels=img_channels, img_size=img_size)
+
+    # ── Train ──
+    opt = torch.optim.Adam(diffusion.model.parameters(), lr=args.lr)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs("samples", exist_ok=True)
 
-    model_for_save = diffusion.model.module if use_data_parallel else diffusion.model
-    best_loss = float("inf")
+    model_for_save = model.module if is_distributed else model
+    best_loss = float('inf')
 
-    global_step = 0
-    for epoch in range(1, epochs + 1):
+    for epoch in range(1, args.epochs + 1):
+        if sampler:
+            sampler.set_epoch(epoch)
+
         total_loss = 0.0
         num_batches = 0
-        pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", ncols=80)
+        pbar = tqdm(loader, desc=f'Epoch {epoch}/{args.epochs}',
+                    ncols=80, disable=(rank != 0))
+
         for batch in pbar:
-            x0 = batch[0].to(diffusion.device)
+            x0 = batch[0].to(device)
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
             opt.step()
             total_loss += loss.item()
             num_batches += 1
-            global_step += 1
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            if rank == 0:
+                pbar.set_postfix(loss=f'{loss.item():.4f}')
 
-        avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch}/{epochs}  avg_loss={avg_loss:.6f}")
+        avg_loss = total_loss / max(num_batches, 1)
 
-        if dataset_type == "celeba":
-            # Save best
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                ckpt_path = os.path.join(CHECKPOINT_DIR, ckpt_name)
-                torch.save(model_for_save.state_dict(), ckpt_path)
-                print(f"  Best checkpoint saved: {ckpt_path}  (loss={best_loss:.6f})")
+        # All-reduce loss across ranks for accurate reporting
+        if is_distributed:
+            loss_tensor = torch.tensor([avg_loss], device=device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+            avg_loss = loss_tensor.item()
 
-            # Sample very infrequently
-            if epoch % sample_interval == 0 or epoch == epochs:
-                samples = diffusion.sample(16)
-                tag = f"celeba_epoch{epoch}"
-                save_sample_grid(samples, os.path.join("samples", f"{tag}.png"))
-        else:
-            # MNIST: periodic checkpoints and samples
-            if epoch % save_interval == 0 or epoch == epochs:
-                ckpt_path = os.path.join(CHECKPOINT_DIR, f"ddpm_epoch{epoch}.pt")
-                torch.save(model_for_save.state_dict(), ckpt_path)
-                print(f"  Checkpoint saved: {ckpt_path}")
+        if rank == 0:
+            print(f'Epoch {epoch}/{args.epochs}  avg_loss={avg_loss:.6f}')
 
-                samples = diffusion.sample(16)
-                save_sample_grid(samples, os.path.join("samples", f"epoch{epoch}.png"))
+            if args.dataset == 'celeba':
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    ckpt_path = os.path.join(CHECKPOINT_DIR, ckpt_name)
+                    torch.save(model_for_save.state_dict(), ckpt_path)
+                    print(f'  Best checkpoint saved: {ckpt_path}  (loss={best_loss:.6f})')
 
-    print("Training done.")
+                if epoch % sample_interval == 0 or epoch == args.epochs:
+                    samples = diffusion.sample(16)
+                    tag = f'celeba_epoch{epoch}'
+                    os.makedirs('samples', exist_ok=True)
+                    save_sample_grid(samples, os.path.join('samples', f'{tag}.png'))
+            else:
+                if epoch % args.save_interval == 0 or epoch == args.epochs:
+                    ckpt_path = os.path.join(CHECKPOINT_DIR, f'ddpm_epoch{epoch}.pt')
+                    torch.save(model_for_save.state_dict(), ckpt_path)
+                    print(f'  Checkpoint saved: {ckpt_path}')
+
+                    os.makedirs('samples', exist_ok=True)
+                    samples = diffusion.sample(16)
+                    save_sample_grid(samples, os.path.join('samples', f'epoch{epoch}.png'))
+
+    if is_distributed:
+        dist.destroy_process_group()
+
+    if rank == 0:
+        print('Training done.')
