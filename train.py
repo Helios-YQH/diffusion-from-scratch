@@ -137,12 +137,27 @@ def save_best_model(model_for_save, run_name):
 
 
 def load_checkpoint(run_name, device, arch_cfg):
-    """Load full training state. Returns (state_dict, meta) or (None, None)."""
+    """Load full training state. Returns (state_dict, meta) or (None, None).
+
+    Handles both new-format (dict with "model"/"optimizer"/"scheduler"
+    keys) and old-format (bare state_dict) checkpoints. Old-format files
+    are promoted to new format with arch_cfg injected — they restore model
+    weights only, with a fresh optimizer/scheduler.
+    """
     path = _checkpoint_path(run_name, "latest")
     if not os.path.exists(path):
         return None, None
 
     state = torch.load(path, map_location=device, weights_only=False)
+
+    # Detect old-format checkpoint: raw state_dict without "model" wrapper.
+    # Model weights always have string keys like "conv_in.weight"; a
+    # new-format checkpoint has top-level keys like "model", "optimizer", …
+    if "model" not in state and "optimizer" not in state:
+        print(f"  [info] Old-format checkpoint detected. "
+              f"Restoring model weights only (fresh optimizer/scheduler).")
+        state = {"model": state, "epoch": 0, "global_step": 0,
+                 "best_loss": float("inf"), "arch": arch_cfg}
 
     # Validate architecture compatibility
     saved_arch = state.get("arch", {})
@@ -272,14 +287,21 @@ def train(args):
         state, ckpt_path = load_checkpoint(run_name, device, arch_cfg)
         if state is not None:
             model_for_save.load_state_dict(state["model"])
-            opt.load_state_dict(state["optimizer"])
 
-            try:
-                scheduler.load_state_dict(state["scheduler"])
-            except Exception as e:
-                if is_main:
-                    print(f"  [warn] Scheduler state mismatch "
-                          f"(config changed?): {e}")
+            if "optimizer" in state:
+                opt.load_state_dict(state["optimizer"])
+            elif is_main:
+                print("  [info] No optimizer state in checkpoint — fresh optimizer.")
+
+            if "scheduler" in state:
+                try:
+                    scheduler.load_state_dict(state["scheduler"])
+                except Exception as e:
+                    if is_main:
+                        print(f"  [warn] Scheduler state mismatch "
+                              f"(config changed?): {e}")
+            elif is_main:
+                print("  [info] No scheduler state in checkpoint — fresh scheduler.")
 
             start_epoch = state["epoch"] + 1
             best_loss = state.get("best_loss", float("inf"))
