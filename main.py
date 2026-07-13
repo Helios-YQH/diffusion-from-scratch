@@ -1,30 +1,26 @@
 """
-DDPM Diffusion Model — supports MNIST (grayscale 28x28) and CelebA (RGB 64x64).
-Uses DistributedDataParallel (DDP) for multi-GPU training.
+DDPM Diffusion Model — MNIST (28x28) and CelebA (64x64).
 
-Usage:
-  # MNIST single GPU (default)
+Training:
+  # Single GPU
   python main.py train --dataset mnist --epochs 50 --batch-size 256
 
-  # MNIST 2 GPUs (DDP)
-  CUDA_VISIBLE_DEVICES=0,1 python main.py train --dataset mnist --gpus 2
+  # 5 GPU DDP (torchrun)
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4 \
+  torchrun --standalone --nproc_per_node=5 \
+  main.py train --dataset celeba --epochs 200 --batch-size 64
 
-  # CelebA 5 GPUs (DDP)
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4 python main.py train --dataset celeba --epochs 200 --batch-size 256 --gpus 5
-
-  # Sample MNIST
-  python main.py sample --dataset mnist --checkpoint checkpoints/ddpm_epoch50.pt --n 64
-
-  # Sample CelebA
-  python main.py sample --dataset celeba --checkpoint checkpoints/ddpm_celeba_best.pt --n 64
+Sampling:
+  python main.py sample --dataset celebA --checkpoint checkpoints/ddpm_celeba_best.pt --n 64
 """
 
 import argparse
 import os
 import torch
-import torch.multiprocessing as mp
 
-from train import train_worker
+from model import UNet
+from diffusion import DDPM
+from train import train, save_sample_grid
 
 
 def main():
@@ -32,7 +28,8 @@ def main():
     parser.add_argument("mode", choices=["train", "sample"])
     parser.add_argument("--dataset", choices=["mnist", "celeba"], default="mnist")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Per-GPU batch size")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--n", type=int, default=16, help="number of images to sample")
@@ -42,16 +39,10 @@ def main():
                         help="Image size (default: 28 for mnist, 64 for celeba)")
     parser.add_argument("--base-channels", type=int, default=None,
                         help="Base channels (default: 64)")
-    parser.add_argument("--gpus", type=int, default=1,
-                        help="Number of GPUs to use (DDP). Select GPUs via CUDA_VISIBLE_DEVICES.")
     args = parser.parse_args()
 
     if args.mode == "train":
-        ngpus = args.gpus if torch.cuda.is_available() else 1
-        if ngpus > 1:
-            mp.spawn(train_worker, args=(ngpus, args), nprocs=ngpus)
-        else:
-            train_worker(0, 1, args)
+        train(args)
 
     elif args.mode == "sample":
         if args.dataset == "celeba":
@@ -62,10 +53,6 @@ def main():
             base_channels = args.base_channels or 64
 
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-        from model import UNet
-        from diffusion import DDPM
-        from train import save_sample_grid
 
         ckpt = args.checkpoint
         if ckpt is None:

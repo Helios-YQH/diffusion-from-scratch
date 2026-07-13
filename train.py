@@ -6,9 +6,8 @@ import warnings
 import glob
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset, TensorDataset, DistributedSampler
+from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
@@ -106,29 +105,53 @@ def save_sample_grid(images, path, nrow=4):
     plt.close()
 
 
-def train_worker(rank, world_size, args):
-    """Entry point for DDP spawn. rank=0, world_size=1 = single GPU."""
-    is_distributed = world_size > 1
+def train(args):
+    """Training entry point. Detects torchrun env vars for DDP."""
+
+    # Detect whether torchrun launched us
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    is_distributed = 'LOCAL_RANK' in os.environ and world_size > 1
+    is_main = rank == 0
 
     if is_distributed:
-        os.environ.setdefault('MASTER_ADDR', '127.0.0.1')
-        os.environ.setdefault('MASTER_PORT', '29500')
-        dist.init_process_group('nccl', rank=rank, world_size=world_size)
-        torch.cuda.set_device(rank)
-        device = f'cuda:{rank}'
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        device = f'cuda:{local_rank}'
+
+        if is_main:
+            print(f"DDP mode")
+            print(f"World size: {world_size}")
+            print(f"Per-GPU batch size: {args.batch_size}")
+            print(f"Global batch size: {args.batch_size * world_size}")
+
+        # Each rank announces its binding once (via a barrier so output is ordered)
+        print(f"Rank {rank} -> cuda:{local_rank}")
+        if world_size > 1:
+            dist.barrier()
     else:
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         if device != 'cpu':
             torch.cuda.set_device(device)
+        print(f"Single GPU: {device}")
+        if torch.cuda.is_available():
+            print(f"Visible GPUs: {torch.cuda.device_count()}")
 
-    # ── Dataset ──
+    # ── Dataset ─────────────────────────────────────────────────────
     if args.dataset == 'celeba':
         img_channels, img_size = 3, args.image_size or 64
         base_channels, num_downs = args.base_channels or 64, 4
         sample_interval = 50
         num_workers = 4
         ckpt_name = 'ddpm_celeba_best.pt'
-        extract_celeba()
+
+        # Only rank 0 does extraction/preprocessing to avoid races
+        # on the .extracted marker and zip extraction.
+        if is_main or not is_distributed:
+            extract_celeba()
+        if is_distributed:
+            dist.barrier()
         data_tensor = preprocess_celeba(image_size=img_size)
         dataset = TensorDataset(data_tensor)
     else:
@@ -147,27 +170,25 @@ def train_worker(rank, world_size, args):
                         sampler=sampler,
                         pin_memory=True, num_workers=num_workers)
 
-    if rank == 0:
-        total_bs = args.batch_size * world_size
-        print(f"DDP mode: {world_size} GPU{'s' if world_size>1 else ''}, "
-              f"per-GPU batch={args.batch_size}, total batch={total_bs}")
-
-    # ── Model ──
+    # ── Model ───────────────────────────────────────────────────────
     model = UNet(img_channels=img_channels, base_channels=base_channels,
                  time_dim=256, num_downs=num_downs).to(device)
     if is_distributed:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     diffusion = DDPM(model, T=args.timesteps, device=device,
                      img_channels=img_channels, img_size=img_size)
 
-    # ── Train ──
+    # ── Optimizer ───────────────────────────────────────────────────
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=args.lr)
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-
     model_for_save = model.module if is_distributed else model
     best_loss = float('inf')
 
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    if is_main:
+        os.makedirs('samples', exist_ok=True)
+
+    # ── Training loop ───────────────────────────────────────────────
     for epoch in range(1, args.epochs + 1):
         if sampler:
             sampler.set_epoch(epoch)
@@ -175,7 +196,7 @@ def train_worker(rank, world_size, args):
         total_loss = 0.0
         num_batches = 0
         pbar = tqdm(loader, desc=f'Epoch {epoch}/{args.epochs}',
-                    ncols=80, disable=(rank != 0))
+                    ncols=80, disable=not is_main)
 
         for batch in pbar:
             x0 = batch[0].to(device)
@@ -185,7 +206,7 @@ def train_worker(rank, world_size, args):
             opt.step()
             total_loss += loss.item()
             num_batches += 1
-            if rank == 0:
+            if is_main:
                 pbar.set_postfix(loss=f'{loss.item():.4f}')
 
         avg_loss = total_loss / max(num_batches, 1)
@@ -196,7 +217,7 @@ def train_worker(rank, world_size, args):
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
             avg_loss = loss_tensor.item()
 
-        if rank == 0:
+        if is_main:
             print(f'Epoch {epoch}/{args.epochs}  avg_loss={avg_loss:.6f}')
 
             if args.dataset == 'celeba':
@@ -209,7 +230,6 @@ def train_worker(rank, world_size, args):
                 if epoch % sample_interval == 0 or epoch == args.epochs:
                     samples = diffusion.sample(16)
                     tag = f'celeba_epoch{epoch}'
-                    os.makedirs('samples', exist_ok=True)
                     save_sample_grid(samples, os.path.join('samples', f'{tag}.png'))
             else:
                 if epoch % args.save_interval == 0 or epoch == args.epochs:
@@ -217,12 +237,11 @@ def train_worker(rank, world_size, args):
                     torch.save(model_for_save.state_dict(), ckpt_path)
                     print(f'  Checkpoint saved: {ckpt_path}')
 
-                    os.makedirs('samples', exist_ok=True)
                     samples = diffusion.sample(16)
                     save_sample_grid(samples, os.path.join('samples', f'epoch{epoch}.png'))
 
     if is_distributed:
         dist.destroy_process_group()
 
-    if rank == 0:
+    if is_main:
         print('Training done.')

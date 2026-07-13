@@ -239,7 +239,8 @@ def main():
     print(f"Device: {device}")
 
     model = UNet(img_channels=img_channels, base_channels=base_channels,
-                 time_dim=256, num_downs=3)
+                 time_dim=256,
+                 num_downs=4 if args.dataset == "celeba" else 3)
     state = torch.load(ckpt, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.to(device)
