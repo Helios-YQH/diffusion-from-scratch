@@ -347,6 +347,7 @@ def train(args):
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.0)
             opt.step()
             scheduler.step()
             total_loss += loss.item()

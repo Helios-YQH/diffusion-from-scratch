@@ -16,7 +16,7 @@ timesteps: 1000
 # ── Training ───────────────────────────────────────────────────────
 epochs: 500
 batch_size: 160       # per-GPU batch size
-lr: 0.0005            # 5e-4
+lr: 0.0002            # 2e-4
 warmup_steps: 2000
 
 # ── Checkpointing ──────────────────────────────────────────────────
