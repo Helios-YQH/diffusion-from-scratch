@@ -68,8 +68,6 @@ def main():
 
     # ── Phase 2: build parser, YAML values as defaults ─────────────
     parser = argparse.ArgumentParser("DDPM")
-    parser.set_defaults(**{k: v for k, v in yaml_defaults.items()
-                           if k not in ("mode", "checkpoint")})
 
     parser.add_argument("mode", choices=["train", "sample"])
     parser.add_argument("--config", type=str, default=config_path,
@@ -98,6 +96,12 @@ def main():
                         help="UNet base channels (default: 128 for celeba, 64 for mnist)")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader workers")
+
+    # set_defaults AFTER add_argument so YAML values override the
+    # hardcoded defaults (action-level defaults win over parser-level)
+    parser.set_defaults(**{k: v for k, v in yaml_defaults.items()
+                           if k not in ("mode", "checkpoint")})
+
     args = parser.parse_args()
 
     # Resolve --resume / --no-resume priority:
