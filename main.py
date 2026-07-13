@@ -1,6 +1,8 @@
 """
 DDPM Diffusion Model — MNIST (28x28) and CelebA (64x64).
 
+注意设置NCCL_P2P_DISABLE=1
+
 Training:
   # Single GPU
   python main.py train --dataset mnist --epochs 50 --batch-size 256
