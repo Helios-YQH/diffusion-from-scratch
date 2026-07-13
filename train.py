@@ -106,20 +106,74 @@ def save_sample_grid(images, path, nrow=4):
     plt.close()
 
 
+# ── Checkpoint save / load ────────────────────────────────────────────
+
+def _checkpoint_path(run_name, kind="latest"):
+    return os.path.join(CHECKPOINT_DIR, f"{run_name}_{kind}.pt")
+
+
+def save_checkpoint(model_for_save, opt, scheduler, epoch, best_loss,
+                    run_name, arch_cfg, global_step):
+    """Save full training state (for resume)."""
+    path = _checkpoint_path(run_name, "latest")
+    state = {
+        "model": model_for_save.state_dict(),
+        "optimizer": opt.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+        "best_loss": best_loss,
+        "arch": arch_cfg,
+    }
+    torch.save(state, path)
+    return path
+
+
+def save_best_model(model_for_save, run_name):
+    """Save model weights only (for sampling / backward compat)."""
+    path = _checkpoint_path(run_name, "best")
+    torch.save(model_for_save.state_dict(), path)
+    return path
+
+
+def load_checkpoint(run_name, device, arch_cfg):
+    """Load full training state. Returns (state_dict, meta) or (None, None)."""
+    path = _checkpoint_path(run_name, "latest")
+    if not os.path.exists(path):
+        return None, None
+
+    state = torch.load(path, map_location=device, weights_only=False)
+
+    # Validate architecture compatibility
+    saved_arch = state.get("arch", {})
+    for key in ("base_channels", "num_downs", "img_channels"):
+        if key in saved_arch and key in arch_cfg:
+            if saved_arch[key] != arch_cfg[key]:
+                raise RuntimeError(
+                    f"Architecture mismatch: saved {key}={saved_arch[key]}, "
+                    f"current {key}={arch_cfg[key]}. "
+                    f"Use --no-resume for a fresh start."
+                )
+
+    return state, path
+
+
+# ── Main training entry point ─────────────────────────────────────────
+
 def train(args):
     """Training entry point. Detects torchrun env vars for DDP."""
 
-    # Detect whether torchrun launched us
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    rank = int(os.environ.get('RANK', 0))
-    world_size = int(os.environ.get('WORLD_SIZE', 1))
-    is_distributed = 'LOCAL_RANK' in os.environ and world_size > 1
+    # ── DDP setup ──────────────────────────────────────────────────
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_distributed = "LOCAL_RANK" in os.environ and world_size > 1
     is_main = rank == 0
 
     if is_distributed:
-        dist.init_process_group(backend='nccl')
+        dist.init_process_group(backend="nccl")
         torch.cuda.set_device(local_rank)
-        device = f'cuda:{local_rank}'
+        device = f"cuda:{local_rank}"
 
         if is_main:
             print(f"DDP mode")
@@ -127,28 +181,24 @@ def train(args):
             print(f"Per-GPU batch size: {args.batch_size}")
             print(f"Global batch size: {args.batch_size * world_size}")
 
-        # Each rank announces its binding once (via a barrier so output is ordered)
         print(f"Rank {rank} -> cuda:{local_rank}")
         if world_size > 1:
             dist.barrier()
     else:
-        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-        if device != 'cpu':
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if device != "cpu":
             torch.cuda.set_device(device)
         print(f"Single GPU: {device}")
         if torch.cuda.is_available():
             print(f"Visible GPUs: {torch.cuda.device_count()}")
 
-    # ── Dataset ─────────────────────────────────────────────────────
-    if args.dataset == 'celeba':
+    # ── Dataset ────────────────────────────────────────────────────
+    if args.dataset == "celeba":
         img_channels, img_size = 3, args.image_size or 64
-        base_channels, num_downs = args.base_channels or 128, 4
-        sample_interval = 50
-        num_workers = 4
-        ckpt_name = 'ddpm_celeba_best.pt'
+        base_channels = args.base_channels or 128
+        num_downs = 4
+        num_workers = getattr(args, "num_workers", 4)
 
-        # Only rank 0 does extraction/preprocessing to avoid races
-        # on the .extracted marker and zip extraction.
         if is_main or not is_distributed:
             extract_celeba()
         if is_distributed:
@@ -157,21 +207,23 @@ def train(args):
         dataset = TensorDataset(data_tensor)
     else:
         img_channels, img_size = 1, args.image_size or 28
-        base_channels, num_downs = args.base_channels or 64, 3
-        sample_interval = args.save_interval
-        num_workers = 0
-        ckpt_name = None
+        base_channels = args.base_channels or 64
+        num_downs = 3
+        num_workers = getattr(args, "num_workers", 0)
+
         x_train = load_mnist()
         dataset = TensorDataset(x_train)
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,
-                                 shuffle=True) if is_distributed else None
+    run_name = f"ddpm_{args.dataset}"
+
+    sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
+                                  shuffle=True) if is_distributed else None)
     loader = DataLoader(dataset, batch_size=args.batch_size,
                         shuffle=(sampler is None),
                         sampler=sampler,
                         pin_memory=True, num_workers=num_workers)
 
-    # ── Model ───────────────────────────────────────────────────────
+    # ── Model ──────────────────────────────────────────────────────
     model = UNet(img_channels=img_channels, base_channels=base_channels,
                  time_dim=256, num_downs=num_downs).to(device)
     if is_distributed:
@@ -180,10 +232,9 @@ def train(args):
     diffusion = DDPM(model, T=args.timesteps, device=device,
                      img_channels=img_channels, img_size=img_size)
 
-    # ── Optimizer ───────────────────────────────────────────────────
+    # ── Optimizer & scheduler ──────────────────────────────────────
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=args.lr)
 
-    # ── LR scheduler: linear warmup → cosine decay ─────────────────
     steps_per_epoch = len(loader)
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = min(args.warmup_steps, total_steps // 2)
@@ -198,21 +249,75 @@ def train(args):
     if is_main:
         print(f"LR: {args.lr}  warmup: {warmup_steps} steps  "
               f"cosine decay to 1e-6 over {total_steps - warmup_steps} steps")
+
     model_for_save = model.module if is_distributed else model
-    best_loss = float('inf')
+    best_loss = float("inf")
+    start_epoch = 1
+
+    # Architecture descriptor for checkpoint compatibility checks
+    arch_cfg = {
+        "base_channels": base_channels,
+        "num_downs": num_downs,
+        "img_channels": img_channels,
+        "img_size": img_size,
+        "timesteps": args.timesteps,
+    }
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     if is_main:
-        os.makedirs('samples', exist_ok=True)
+        os.makedirs("samples", exist_ok=True)
 
-    # ── Training loop ───────────────────────────────────────────────
-    for epoch in range(1, args.epochs + 1):
+    # ── Resume from checkpoint ─────────────────────────────────────
+    if args.resume:
+        state, ckpt_path = load_checkpoint(run_name, device, arch_cfg)
+        if state is not None:
+            model_for_save.load_state_dict(state["model"])
+            opt.load_state_dict(state["optimizer"])
+
+            try:
+                scheduler.load_state_dict(state["scheduler"])
+            except Exception as e:
+                if is_main:
+                    print(f"  [warn] Scheduler state mismatch "
+                          f"(config changed?): {e}")
+
+            start_epoch = state["epoch"] + 1
+            best_loss = state.get("best_loss", float("inf"))
+            if is_main:
+                saved_step = state.get("global_step", 0)
+                print(f"Resumed from {ckpt_path}")
+                print(f"  epoch {state['epoch']}  best_loss={best_loss:.6f}  "
+                      f"global_step={saved_step}")
+        elif is_main:
+            print(f"No checkpoint found at "
+                  f"{_checkpoint_path(run_name, 'latest')} — fresh start.")
+
+    if is_distributed:
+        # Broadcast start_epoch so all ranks agree
+        t = torch.tensor([start_epoch], device=device)
+        dist.broadcast(t, src=0)
+        start_epoch = int(t.item())
+        dist.barrier()
+
+    if start_epoch > args.epochs:
+        if is_main:
+            print(f"Already completed {args.epochs} epochs (resumed from "
+                  f"epoch {start_epoch - 1}). Nothing to do.")
+        if is_distributed:
+            dist.destroy_process_group()
+        return
+
+    # ── Training loop ──────────────────────────────────────────────
+    sample_interval = getattr(args, "sample_interval", args.save_interval)
+    save_interval = args.save_interval
+
+    for epoch in range(start_epoch, args.epochs + 1):
         if sampler:
             sampler.set_epoch(epoch)
 
         total_loss = 0.0
         num_batches = 0
-        pbar = tqdm(loader, desc=f'Epoch {epoch}/{args.epochs}',
+        pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.epochs}",
                     ncols=80, disable=not is_main)
 
         for batch in pbar:
@@ -225,41 +330,43 @@ def train(args):
             total_loss += loss.item()
             num_batches += 1
             if is_main:
-                pbar.set_postfix(loss=f'{loss.item():.4f}')
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         avg_loss = total_loss / max(num_batches, 1)
 
-        # All-reduce loss across ranks for accurate reporting
         if is_distributed:
             loss_tensor = torch.tensor([avg_loss], device=device)
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
             avg_loss = loss_tensor.item()
 
+        global_step = epoch * steps_per_epoch
+
         if is_main:
-            print(f'Epoch {epoch}/{args.epochs}  avg_loss={avg_loss:.6f}')
+            print(f"Epoch {epoch}/{args.epochs}  avg_loss={avg_loss:.6f}  "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
 
-            if args.dataset == 'celeba':
-                if avg_loss < best_loss:
-                    best_loss = avg_loss
-                    ckpt_path = os.path.join(CHECKPOINT_DIR, ckpt_name)
-                    torch.save(model_for_save.state_dict(), ckpt_path)
-                    print(f'  Best checkpoint saved: {ckpt_path}  (loss={best_loss:.6f})')
+            # Best model (weights only, for sampling backward compat)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                path = save_best_model(model_for_save, run_name)
+                print(f"  Best checkpoint: {path}  (loss={best_loss:.6f})")
 
-                if epoch % sample_interval == 0 or epoch == args.epochs:
-                    samples = diffusion.sample(16)
-                    tag = f'celeba_epoch{epoch}'
-                    save_sample_grid(samples, os.path.join('samples', f'{tag}.png'))
-            else:
-                if epoch % args.save_interval == 0 or epoch == args.epochs:
-                    ckpt_path = os.path.join(CHECKPOINT_DIR, f'ddpm_epoch{epoch}.pt')
-                    torch.save(model_for_save.state_dict(), ckpt_path)
-                    print(f'  Checkpoint saved: {ckpt_path}')
+            # Periodic full training state
+            if epoch % save_interval == 0 or epoch == args.epochs:
+                path = save_checkpoint(model_for_save, opt, scheduler,
+                                       epoch, best_loss, run_name,
+                                       arch_cfg, global_step)
+                print(f"  Training state saved: {path}")
 
-                    samples = diffusion.sample(16)
-                    save_sample_grid(samples, os.path.join('samples', f'epoch{epoch}.png'))
+            # Sample grid
+            if epoch % sample_interval == 0 or epoch == args.epochs:
+                samples = diffusion.sample(16)
+                tag = f"{args.dataset}_epoch{epoch}"
+                save_sample_grid(samples,
+                                 os.path.join("samples", f"{tag}.png"))
 
     if is_distributed:
         dist.destroy_process_group()
 
     if is_main:
-        print('Training done.')
+        print("Training done.")

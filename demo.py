@@ -224,14 +224,25 @@ def main():
     args = parser.parse_args()
 
     if args.dataset == "celeba":
-        img_channels, img_size, base_channels = 3, 64, 64
+        img_channels, img_size, base_channels = 3, 64, 128
     else:
         img_channels, img_size, base_channels = 1, 28, 64
 
     ckpt = args.checkpoint
     if ckpt is None:
         ckpt_dir = "checkpoints"
-        ckpt = os.path.join(ckpt_dir, sorted(os.listdir(ckpt_dir))[-1])
+        run_name = f"ddpm_{args.dataset}"
+        candidates = [
+            os.path.join(ckpt_dir, f"{run_name}_best.pt"),
+            os.path.join(ckpt_dir, f"{run_name}_latest.pt"),
+        ]
+        ckpt = next((c for c in candidates if os.path.exists(c)), None)
+        if ckpt is None:
+            pts = sorted([f for f in os.listdir(ckpt_dir) if f.endswith(".pt")])
+            if pts:
+                ckpt = os.path.join(ckpt_dir, pts[-1])
+            else:
+                raise FileNotFoundError("No .pt checkpoint in checkpoints/")
     print(f"Checkpoint: {ckpt}")
     print(f"Dataset: {args.dataset}  ({img_channels}ch, {img_size}x{img_size})")
 
@@ -241,7 +252,8 @@ def main():
     model = UNet(img_channels=img_channels, base_channels=base_channels,
                  time_dim=256,
                  num_downs=4 if args.dataset == "celeba" else 3)
-    state = torch.load(ckpt, map_location=device, weights_only=True)
+    raw = torch.load(ckpt, map_location=device, weights_only=False)
+    state = raw["model"] if isinstance(raw, dict) and "model" in raw else raw
     model.load_state_dict(state)
     model.to(device)
     model.eval()

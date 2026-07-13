@@ -1,16 +1,25 @@
 """
 DDPM Diffusion Model — MNIST (28x28) and CelebA (64x64).
 
-注意设置NCCL_P2P_DISABLE=1
+注意设置 NCCL_P2P_DISABLE=1
 
 Training:
-  # Single GPU
-  python main.py train --dataset mnist --epochs 50 --batch-size 256
+  # Single GPU with YAML config
+  python main.py train --config configs/celeba.yml
 
-  # 5 GPU DDP (torchrun)
+  # 5 GPU DDP (torchrun), CLI overrides YAML
   CUDA_VISIBLE_DEVICES=0,1,2,3,4 \
   torchrun --standalone --nproc_per_node=5 \
-  main.py train --dataset celeba --epochs 200 --batch-size 64
+  main.py train --config configs/celeba.yml --batch-size 160
+
+  # Without config (uses defaults)
+  python main.py train --dataset mnist --epochs 50
+
+  # Resume from latest checkpoint
+  python main.py train --config configs/celeba.yml --resume
+
+  # Force fresh start (ignore saved checkpoint)
+  python main.py train --config configs/celeba.yml --no-resume
 
 Sampling:
   python main.py sample --dataset celebA --checkpoint checkpoints/ddpm_celeba_best.pt --n 64
@@ -18,6 +27,7 @@ Sampling:
 
 import argparse
 import os
+import sys
 import torch
 
 from model import UNet
@@ -25,47 +35,133 @@ from diffusion import DDPM
 from train import train, save_sample_grid
 
 
+def _load_yaml_config(path):
+    """Load a YAML config file. Gives a clear error if PyYAML is missing."""
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "YAML config support requires PyYAML. Install it first:\n"
+            "  pip install pyyaml"
+        )
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config file {path} must be a YAML mapping, got {type(cfg)}")
+    return cfg
+
+
+def _scan_config_arg():
+    """Quick first pass over sys.argv to find --config <path>."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return None
+
+
 def main():
+    # ── Phase 1: load YAML config (if any) ──────────────────────────
+    config_path = _scan_config_arg()
+    yaml_defaults = {}
+    if config_path:
+        yaml_defaults = _load_yaml_config(config_path)
+
+    # ── Phase 2: build parser, YAML values as defaults ─────────────
     parser = argparse.ArgumentParser("DDPM")
+    parser.set_defaults(**{k: v for k, v in yaml_defaults.items()
+                           if k not in ("mode", "checkpoint")})
+
     parser.add_argument("mode", choices=["train", "sample"])
+    parser.add_argument("--config", type=str, default=config_path,
+                        help="Path to YAML config file")
     parser.add_argument("--dataset", choices=["mnist", "celeba"], default="mnist")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Per-GPU batch size")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--warmup-steps", type=int, default=1000,
-                        help="Linear LR warmup steps")
+                        help="Linear LR warmup steps (before cosine decay)")
+    parser.add_argument("--resume", action="store_true", default=None,
+                        help="Resume from latest checkpoint")
+    parser.add_argument("--no-resume", action="store_true", default=False,
+                        help="Force fresh start, ignore saved checkpoint")
     parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--n", type=int, default=16, help="number of images to sample")
-    parser.add_argument("--save-interval", type=int, default=10)
+    parser.add_argument("--n", type=int, default=16, help="Number of images to sample")
+    parser.add_argument("--save-interval", type=int, default=10,
+                        help="Save full checkpoint every N epochs")
+    parser.add_argument("--sample-interval", type=int, default=10,
+                        help="Generate sample grid every N epochs")
     parser.add_argument("--timesteps", type=int, default=1000)
     parser.add_argument("--image-size", type=int, default=None,
                         help="Image size (default: 28 for mnist, 64 for celeba)")
     parser.add_argument("--base-channels", type=int, default=None,
-                        help="Base channels (default: 64)")
+                        help="UNet base channels (default: 128 for celeba, 64 for mnist)")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="DataLoader workers")
     args = parser.parse_args()
+
+    # Resolve --resume / --no-resume priority:
+    #   CLI --no-resume → False
+    #   CLI --resume    → True
+    #   neither + YAML resume: true → True
+    #   neither + no YAML          → False
+    if args.no_resume:
+        args.resume = False
+    elif args.resume is None:
+        args.resume = yaml_defaults.get("resume", False)
 
     if args.mode == "train":
         train(args)
 
     elif args.mode == "sample":
-        if args.dataset == "celeba":
-            img_channels, img_size = 3, args.image_size or 64
-            base_channels = args.base_channels or 64
-        else:
-            img_channels, img_size = 1, args.image_size or 28
-            base_channels = args.base_channels or 64
-
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+        # ── Find checkpoint ───────────────────────────────────────
         ckpt = args.checkpoint
         if ckpt is None:
-            ckpt = os.path.join("checkpoints", sorted(os.listdir("checkpoints"))[-1])
+            run_name = f"ddpm_{args.dataset}"
+            # Prefer best > latest > any .pt file
+            candidates = [
+                os.path.join("checkpoints", f"{run_name}_best.pt"),
+                os.path.join("checkpoints", f"{run_name}_latest.pt"),
+            ]
+            ckpt = next((c for c in candidates if os.path.exists(c)), None)
+            if ckpt is None:
+                pts = sorted([f for f in os.listdir("checkpoints")
+                              if f.endswith(".pt")])
+                if pts:
+                    ckpt = os.path.join("checkpoints", pts[-1])
+                else:
+                    raise FileNotFoundError(
+                        "No .pt checkpoint found in checkpoints/")
+
         print(f"Loading checkpoint: {ckpt}")
-        state = torch.load(ckpt, map_location=device, weights_only=True)
+        raw = torch.load(ckpt, map_location=device, weights_only=False)
+
+        # Support both raw state_dict and full training-state dict
+        if isinstance(raw, dict) and "model" in raw:
+            state = raw["model"]
+            arch_cfg = raw.get("arch", {})
+        else:
+            state = raw
+            arch_cfg = {}
+
+        # ── Architecture (from checkpoint if available, else CLI/YAML) ──
+        if args.dataset == "celeba":
+            img_channels = arch_cfg.get("img_channels", 3)
+            img_size = arch_cfg.get("img_size", args.image_size or 64)
+            base_channels = arch_cfg.get("base_channels",
+                                          args.base_channels or 128)
+            num_downs = arch_cfg.get("num_downs", 4)
+        else:
+            img_channels = arch_cfg.get("img_channels", 1)
+            img_size = arch_cfg.get("img_size", args.image_size or 28)
+            base_channels = arch_cfg.get("base_channels",
+                                          args.base_channels or 64)
+            num_downs = arch_cfg.get("num_downs", 3)
 
         model = UNet(img_channels=img_channels, base_channels=base_channels,
-                     time_dim=256, num_downs=4 if args.dataset == "celeba" else 3)
+                     time_dim=256, num_downs=num_downs)
         model.load_state_dict(state)
         model.to(device)
 
@@ -75,7 +171,8 @@ def main():
         samples, steps = diffusion.sample(args.n, return_all=True)
 
         os.makedirs("samples", exist_ok=True)
-        save_sample_grid(samples, os.path.join("samples", f"generated_{args.dataset}.png"))
+        save_sample_grid(samples, os.path.join("samples",
+                         f"generated_{args.dataset}.png"))
         print(f"Saved generated_{args.dataset}.png")
 
         if steps and len(steps) > 1:
