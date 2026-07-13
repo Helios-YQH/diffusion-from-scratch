@@ -1,11 +1,10 @@
-"""Demonstrate the diffusion denoising process using a trained checkpoint.
+"""Demonstrate the DDPM denoising process using a trained checkpoint.
 
 Supports both MNIST (grayscale 28x28) and CelebA (RGB 64x64).
 
 Usage:
-  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt                   # MNIST
-  python demo.py --checkpoint checkpoints/ddpm_celeba_best.pt --dataset celeba  # CelebA
-  python demo.py --dataset celeba --mode gallery --n 64
+  python demo.py --dataset celebA
+  python demo.py --checkpoint checkpoints/ddpm_epoch170.pt
 """
 
 import argparse
@@ -187,39 +186,10 @@ def demo_animate(diffusion, capture_interval=10):
     print(f"  Saved {png_path}")
 
 
-def demo_gallery(diffusion, n_digits=64, nrow=8):
-    """Generate a gallery of digits/faces."""
-    print(f"Generating gallery of {n_digits} images...")
-    samples = diffusion.sample(n_digits)
-
-    ncol = max(1, n_digits // nrow)
-    fig, axes = plt.subplots(nrow, ncol, figsize=(ncol * 1.5, nrow * 1.5))
-    if ncol == 1 and nrow == 1:
-        axes = np.array([[axes]])
-    elif ncol == 1:
-        axes = axes[:, None]
-    elif nrow == 1:
-        axes = axes[None, :]
-    for i, ax in enumerate(axes.flat):
-        if i < n_digits:
-            show_image(ax, to_image(samples[i]))
-        ax.axis("off")
-
-    fig.suptitle(f"DDPM Generated Images ({n_digits} samples)", fontsize=14, y=1.02)
-    plt.tight_layout()
-    path = os.path.join("samples", "demo_gallery.png")
-    os.makedirs("samples", exist_ok=True)
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  Saved {path}")
-
-
 def main():
     parser = argparse.ArgumentParser("DDPM Demo")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--dataset", choices=["mnist", "celeba"], default="mnist")
-    parser.add_argument("--mode", choices=["all", "animate", "gallery"], default="all")
-    parser.add_argument("--n", type=int, default=64)
     parser.add_argument("--capture-interval", type=int, default=10)
     args = parser.parse_args()
 
@@ -261,10 +231,7 @@ def main():
     diffusion = DDPM(model, T=1000, device=device,
                      img_channels=img_channels, img_size=img_size)
 
-    if args.mode in ("all", "animate"):
-        demo_animate(diffusion, capture_interval=args.capture_interval)
-    if args.mode in ("all", "gallery"):
-        demo_gallery(diffusion, n_digits=args.n)
+    demo_animate(diffusion, capture_interval=args.capture_interval)
 
     print("Demo complete.")
 
