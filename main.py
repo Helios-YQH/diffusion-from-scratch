@@ -30,8 +30,8 @@ import os
 import sys
 import torch
 
-from model import UNet
-from diffusion import DDPM
+from models.unet import UNet
+from diffusion.ddpm import DDPM
 from train import train, save_sample_grid
 
 

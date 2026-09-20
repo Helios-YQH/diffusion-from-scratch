@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
 
-from model import UNet
-from diffusion import DDPM
+from models.unet import UNet
+from diffusion.ddpm import DDPM
 
 
 def to_image(tensor):

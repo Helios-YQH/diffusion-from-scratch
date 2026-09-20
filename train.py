@@ -14,8 +14,8 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from model import UNet
-from diffusion import DDPM
+from models.unet import UNet
+from diffusion.ddpm import DDPM
 
 DATA_PATH = os.path.join("data", "mnist", "mnist.pkl.gz")
 CELEBA_PATH = os.path.join("data", "celeba.zip")

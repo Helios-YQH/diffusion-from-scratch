@@ -1,7 +1,17 @@
-"""Quick smoke test — model shapes and data loading."""
-import torch, os, tempfile, shutil
-from model import UNet
-from diffusion import DDPM
+"""Quick smoke test — model shapes and data loading.
+
+Run from repo root:  python tests/test_check.py
+"""
+import os
+import sys
+import tempfile
+import shutil
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch
+from models.unet import UNet
+from diffusion.ddpm import DDPM
 from train import load_mnist, preprocess_celeba, extract_celeba
 
 print("1. MNIST backward-compat")
