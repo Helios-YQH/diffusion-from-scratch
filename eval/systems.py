@@ -204,8 +204,11 @@ def main():
         res["world_size"] = world_size
         res["global_throughput_img_s"] = res["throughput_img_s"] * world_size
         if peak_flops:
-            res["mfu"] = mfu(forward_flops, batch_size * world_size,
-                             res["step_time_s"], peak_flops)
+            # step_time is the wall clock of the whole step, so the per-GPU
+            # batch is what belongs next to the per-GPU peak — using the global
+            # batch here would inflate MFU by world_size.
+            res["mfu"] = mfu(forward_flops, batch_size, res["step_time_s"],
+                             peak_flops)
         results.append(res)
         if is_main:
             line = (f"\n[{res['setting']}] {res['step_time_s'] * 1e3:.1f} ms/step "
@@ -237,14 +240,30 @@ def main():
         os.makedirs(RESULTS_DIR, exist_ok=True)
         stem = os.path.splitext(os.path.basename(args.config))[0]
         out = os.path.join(RESULTS_DIR, f"systems_{stem}.json")
+        # The settings sweep and the DDP measurement are separate invocations
+        # writing the same file: merge rather than overwrite, or the figures
+        # silently lose one half.
+        existing = {}
+        if os.path.exists(out):
+            with open(out, encoding="utf-8") as f:
+                existing = json.load(f)
+        merged = {r["setting"]: r for r in existing.get("results", [])}
+        for r in results:
+            merged[r["setting"]] = r
+        payload = {
+            "config": args.config,
+            "batch_size_per_gpu": batch_size,
+            "world_size": world_size,
+            "steps": args.steps,
+            "params": sum(p.numel() for p in model.parameters()),
+            "forward_flops_per_sample": forward_flops,
+            "gpu_name": gpu_name,
+            "results": sorted(merged.values(), key=lambda r: r["setting"]),
+            "profile_fractions": fracs if args.profile
+            else existing.get("profile_fractions"),
+        }
         with open(out, "w", encoding="utf-8") as f:
-            json.dump({"config": args.config, "batch_size_per_gpu": batch_size,
-                       "world_size": world_size, "steps": args.steps,
-                       "params": sum(p.numel() for p in model.parameters()),
-                       "forward_flops_per_sample": forward_flops,
-                       "gpu_name": gpu_name, "results": results,
-                       "profile_fractions": args.profile and fracs or None},
-                      f, indent=2)
+            json.dump(payload, f, indent=2)
         print(f"\nWritten: {out}")
 
     if is_distributed:
