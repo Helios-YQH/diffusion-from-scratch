@@ -1,27 +1,38 @@
-import gzip
-import pickle
-import os
-import zipfile
-import warnings
+import contextlib
 import glob
-import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-from torch.utils.data import DataLoader, TensorDataset, DistributedSampler
+import gzip
+import json
+import os
+import pickle
+import random
+import subprocess
+import time
+import warnings
+import zipfile
+
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torch.distributed as dist
 from PIL import Image
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 from tqdm import tqdm
 
-from models.unet import UNet
 from diffusion.ddpm import DDPM
+from diffusion.flow import RectifiedFlow
+from models.dit import DiT
+from models.unet import UNet
 
 DATA_PATH = os.path.join("data", "mnist", "mnist.pkl.gz")
 CELEBA_PATH = os.path.join("data", "celeba.zip")
 CELEBA_DIR = os.path.join("data", "celeba")
 CHECKPOINT_DIR = "checkpoints"
+RESULTS_DIR = "results"
 
+
+# ── Data ──────────────────────────────────────────────────────────────
 
 def extract_celeba():
     """Extract CelebA zip to data/celeba/ once. Skips if already done."""
@@ -106,6 +117,68 @@ def save_sample_grid(images, path, nrow=4):
     plt.close()
 
 
+# ── Model / objective construction ────────────────────────────────────
+
+def build_model(args, img_channels, img_size):
+    if args.backbone == "dit":
+        return DiT(img_size=img_size, patch_size=args.patch_size,
+                   img_channels=img_channels, hidden_size=args.hidden_size,
+                   depth=args.depth, num_heads=args.num_heads)
+    return UNet(img_channels=img_channels, base_channels=args.base_channels,
+                time_dim=256, num_downs=args.num_downs)
+
+
+def build_objective(args, model, device, img_channels, img_size):
+    if args.objective == "rf":
+        return RectifiedFlow(model, device=device, img_channels=img_channels,
+                             img_size=img_size, t_sample=args.t_sample)
+    return DDPM(model, T=args.timesteps, device=device,
+                img_channels=img_channels, img_size=img_size)
+
+
+# ── EMA ───────────────────────────────────────────────────────────────
+
+class EMA:
+    """Exponential moving average of model weights.
+
+    decay 0.9999 gives a ~10k-step window; keep it well below the total
+    number of training steps.
+    """
+
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone().float()
+                       for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model):
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(
+                    v.detach().float(), alpha=1.0 - self.decay)
+            else:
+                self.shadow[k].copy_(v)
+
+    def state_dict(self):
+        return self.shadow
+
+    def load_state_dict(self, state):
+        self.shadow = {k: v.clone().float() for k, v in state.items()}
+
+    def copy_to(self, model):
+        model.load_state_dict(self.shadow)
+
+    @contextlib.contextmanager
+    def applied_to(self, model):
+        """Temporarily swap EMA weights into `model` (restores on exit)."""
+        raw = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        self.copy_to(model)
+        try:
+            yield
+        finally:
+            model.load_state_dict(raw)
+
+
 # ── Checkpoint save / load ────────────────────────────────────────────
 
 def _checkpoint_path(run_name, kind="latest"):
@@ -113,8 +186,8 @@ def _checkpoint_path(run_name, kind="latest"):
 
 
 def save_checkpoint(model_for_save, opt, scheduler, epoch, best_loss,
-                    run_name, arch_cfg, global_step):
-    """Save full training state (for resume)."""
+                    run_name, arch_cfg, global_step, ema=None):
+    """Full training state (for resume), including EMA weights."""
     path = _checkpoint_path(run_name, "latest")
     state = {
         "model": model_for_save.state_dict(),
@@ -125,14 +198,22 @@ def save_checkpoint(model_for_save, opt, scheduler, epoch, best_loss,
         "best_loss": best_loss,
         "arch": arch_cfg,
     }
+    if ema is not None:
+        state["ema"] = ema.state_dict()
     torch.save(state, path)
     return path
 
 
-def save_best_model(model_for_save, run_name):
-    """Save model weights only (for sampling / backward compat)."""
-    path = _checkpoint_path(run_name, "best")
-    torch.save(model_for_save.state_dict(), path)
+def save_weights(model_for_save, ema, run_name, arch_cfg, kind="best",
+                 ema_only=False):
+    """Weights only — for `best` and per-epoch snapshots."""
+    path = _checkpoint_path(run_name, kind)
+    state = {"arch": arch_cfg}
+    if not ema_only:
+        state["model"] = model_for_save.state_dict()
+    if ema is not None:
+        state["ema"] = ema.state_dict()
+    torch.save(state, path)
     return path
 
 
@@ -159,18 +240,27 @@ def load_checkpoint(run_name, device, arch_cfg):
         state = {"model": state, "epoch": 0, "global_step": 0,
                  "best_loss": float("inf"), "arch": arch_cfg}
 
-    # Validate architecture compatibility
+    # Validate architecture compatibility on shared keys
     saved_arch = state.get("arch", {})
-    for key in ("base_channels", "num_downs", "img_channels"):
-        if key in saved_arch and key in arch_cfg:
-            if saved_arch[key] != arch_cfg[key]:
+    for key, val in arch_cfg.items():
+        if key in saved_arch and saved_arch[key] is not None and val is not None:
+            if saved_arch[key] != val:
                 raise RuntimeError(
                     f"Architecture mismatch: saved {key}={saved_arch[key]}, "
-                    f"current {key}={arch_cfg[key]}. "
+                    f"current {key}={val}. "
                     f"Use --no-resume for a fresh start."
                 )
 
     return state, path
+
+
+def _git_commit():
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                      stderr=subprocess.DEVNULL)
+        return out.decode().strip()
+    except Exception:
+        return "unknown"
 
 
 # ── Main training entry point ─────────────────────────────────────────
@@ -207,6 +297,15 @@ def train(args):
         if torch.cuda.is_available():
             print(f"Visible GPUs: {torch.cuda.device_count()}")
 
+    seed = getattr(args, "seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    run_name = args.run_name or f"{args.dataset}_{args.backbone}_{args.objective}"
+
     # ── Dataset ────────────────────────────────────────────────────
     if args.dataset == "celeba":
         img_channels, img_size = 3, args.image_size or 64
@@ -229,7 +328,10 @@ def train(args):
         x_train = load_mnist()
         dataset = TensorDataset(x_train)
 
-    run_name = f"ddpm_{args.dataset}"
+    # Keep the UNet fields populated even for DiT runs: they are part of the
+    # architecture descriptor used for checkpoint compatibility checks.
+    args.base_channels = base_channels
+    args.num_downs = num_downs
 
     sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
                                   shuffle=True) if is_distributed else None)
@@ -239,13 +341,11 @@ def train(args):
                         pin_memory=True, num_workers=num_workers)
 
     # ── Model ──────────────────────────────────────────────────────
-    model = UNet(img_channels=img_channels, base_channels=base_channels,
-                 time_dim=256, num_downs=num_downs).to(device)
+    model = build_model(args, img_channels, img_size).to(device)
     if is_distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    diffusion = DDPM(model, T=args.timesteps, device=device,
-                     img_channels=img_channels, img_size=img_size)
+    diffusion = build_objective(args, model, device, img_channels, img_size)
 
     # ── Optimizer & scheduler ──────────────────────────────────────
     opt = torch.optim.Adam(diffusion.model.parameters(), lr=args.lr)
@@ -266,17 +366,28 @@ def train(args):
               f"cosine decay to 1e-6 over {total_steps - warmup_steps} steps")
 
     model_for_save = model.module if is_distributed else model
+    n_params = sum(p.numel() for p in model_for_save.parameters())
     best_loss = float("inf")
     start_epoch = 1
+    resumed_state = None
 
-    # Architecture descriptor for checkpoint compatibility checks
     arch_cfg = {
+        "backbone": args.backbone,
+        "objective": args.objective,
         "base_channels": base_channels,
         "num_downs": num_downs,
         "img_channels": img_channels,
         "img_size": img_size,
         "timesteps": args.timesteps,
+        "patch_size": getattr(args, "patch_size", None),
+        "hidden_size": getattr(args, "hidden_size", None),
+        "depth": getattr(args, "depth", None),
+        "num_heads": getattr(args, "num_heads", None),
     }
+
+    if is_main:
+        print(f"Run: {run_name}  backbone={args.backbone}  "
+              f"objective={args.objective}  params={n_params / 1e6:.1f}M")
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     if is_main:
@@ -286,6 +397,7 @@ def train(args):
     if args.resume:
         state, ckpt_path = load_checkpoint(run_name, device, arch_cfg)
         if state is not None:
+            resumed_state = state
             model_for_save.load_state_dict(state["model"])
 
             if "optimizer" in state:
@@ -314,6 +426,12 @@ def train(args):
             print(f"No checkpoint found at "
                   f"{_checkpoint_path(run_name, 'latest')} — fresh start.")
 
+    ema = EMA(model_for_save, decay=getattr(args, "ema_decay", 0.9999))
+    if resumed_state is not None and "ema" in resumed_state:
+        ema.load_state_dict(resumed_state["ema"])
+        if is_main:
+            print("  [info] EMA state restored.")
+
     if is_distributed:
         # Broadcast start_epoch so all ranks agree
         t = torch.tensor([start_epoch], device=device)
@@ -332,30 +450,50 @@ def train(args):
     # ── Training loop ──────────────────────────────────────────────
     sample_interval = getattr(args, "sample_interval", args.save_interval)
     save_interval = args.save_interval
+    snapshot_interval = getattr(args, "snapshot_interval", 0)
+    max_steps = getattr(args, "max_steps", 0) or 0
+    grad_clip = getattr(args, "grad_clip", 1.0)
+
+    epoch_time = 0.0
+    throughput = 0.0
+    avg_loss = float("nan")
+    avg_gnorm = float("nan")
 
     for epoch in range(start_epoch, args.epochs + 1):
         if sampler:
             sampler.set_epoch(epoch)
 
         total_loss = 0.0
+        total_gnorm = 0.0
         num_batches = 0
+        t_start = time.time()
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.epochs}",
                     ncols=80, disable=not is_main)
 
         for batch in pbar:
-            x0 = batch[0].to(device)
+            x0 = batch[0].to(device, non_blocking=True)
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), 1.0)
+            gnorm = torch.nn.utils.clip_grad_norm_(
+                diffusion.model.parameters(), grad_clip)
             opt.step()
             scheduler.step()
+            ema.update(model_for_save)
+
             total_loss += loss.item()
+            total_gnorm += float(gnorm)
             num_batches += 1
             if is_main:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
+            if max_steps and num_batches >= max_steps:
+                break
 
+        epoch_time = time.time() - t_start
         avg_loss = total_loss / max(num_batches, 1)
+        avg_gnorm = total_gnorm / max(num_batches, 1)
+        throughput = (num_batches * args.batch_size * world_size
+                      / max(epoch_time, 1e-9))
 
         if is_distributed:
             loss_tensor = torch.tensor([avg_loss], device=device)
@@ -366,27 +504,71 @@ def train(args):
 
         if is_main:
             print(f"Epoch {epoch}/{args.epochs}  avg_loss={avg_loss:.6f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"grad={avg_gnorm:.3f}  lr={scheduler.get_last_lr()[0]:.2e}  "
+                  f"| {epoch_time:.1f}s  {throughput:.0f} img/s")
 
-            # Best model (weights only, for sampling backward compat)
+            # Best model (weights only, raw + EMA, for sampling / eval)
             if avg_loss < best_loss:
                 best_loss = avg_loss
-                path = save_best_model(model_for_save, run_name)
+                path = save_weights(model_for_save, ema, run_name, arch_cfg,
+                                    kind="best")
                 print(f"  Best checkpoint: {path}  (loss={best_loss:.6f})")
+
+            # Per-epoch snapshots (EMA weights only) — FID-vs-steps curves
+            if snapshot_interval and (epoch % snapshot_interval == 0
+                                      or epoch == args.epochs):
+                path = save_weights(model_for_save, ema, run_name, arch_cfg,
+                                    kind=f"epoch{epoch}", ema_only=True)
+                print(f"  Snapshot: {path}")
 
             # Periodic full training state
             if epoch % save_interval == 0 or epoch == args.epochs:
                 path = save_checkpoint(model_for_save, opt, scheduler,
                                        epoch, best_loss, run_name,
-                                       arch_cfg, global_step)
+                                       arch_cfg, global_step, ema=ema)
                 print(f"  Training state saved: {path}")
 
-            # Sample grid
+            # Sample grid (EMA weights)
             if epoch % sample_interval == 0 or epoch == args.epochs:
-                samples = diffusion.sample(16)
-                tag = f"{args.dataset}_epoch{epoch}"
-                save_sample_grid(samples,
-                                 os.path.join("samples", f"{tag}.png"))
+                with ema.applied_to(model_for_save):
+                    samples = diffusion.sample(16)
+                save_sample_grid(
+                    samples, os.path.join("samples", f"{run_name}_epoch{epoch}.png"))
+
+    # ── Cost accounting summary ────────────────────────────────────
+    if is_main:
+        peak_gb = 0.0
+        if str(device).startswith("cuda"):
+            peak_gb = torch.cuda.max_memory_allocated(torch.device(device)) / 1e9
+        step_time = epoch_time / max(num_batches, 1)
+        print(f"\nModel: {args.backbone}  Params: {n_params / 1e6:.1f}M")
+        print(f"Training: batch {args.batch_size * world_size} | "
+              f"{step_time:.3f} s/step | {throughput:.0f} img/s | "
+              f"peak {peak_gb:.1f} GB")
+
+        summary = {
+            "run_name": run_name,
+            "backbone": args.backbone,
+            "objective": args.objective,
+            "dataset": args.dataset,
+            "epochs": args.epochs,
+            "params": n_params,
+            "global_batch_size": args.batch_size * world_size,
+            "world_size": world_size,
+            "final_avg_loss": avg_loss,
+            "final_grad_norm": avg_gnorm,
+            "best_loss": best_loss,
+            "step_time_s": step_time,
+            "throughput_img_s": throughput,
+            "peak_memory_gb": peak_gb,
+            "git_commit": _git_commit(),
+            "config": {k: v for k, v in vars(args).items()},
+        }
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        out_path = os.path.join(RESULTS_DIR, f"{run_name}.json")
+        with open(out_path, "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+        print(f"Results written: {out_path}")
 
     if is_distributed:
         dist.destroy_process_group()

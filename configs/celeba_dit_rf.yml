@@ -1,22 +1,24 @@
-# Cell A — UNet + eps-prediction (DDPM baseline)
+# Cell D — DiT + rectified flow  (combined)
 # Protocol frozen 2026-09-20: see reports/exp_plan.md
 #
-#   torchrun --standalone --nproc_per_node=5 main.py train --config configs/celeba_unet_eps.yml
-#   python main.py train --config configs/celeba_unet_eps.yml
+#   torchrun --standalone --nproc_per_node=5 main.py train --config configs/celeba_dit_rf.yml
 
-run_name: celeba_unet_eps
+run_name: celeba_dit_rf
 dataset: celeba
-backbone: unet
-objective: eps
+backbone: dit
+objective: rf
+t_sample: uniform
 
 # ── Model ──────────────────────────────────────────────────────────
 image_size: 64
-base_channels: 128
-timesteps: 1000
+patch_size: 4
+hidden_size: 768
+depth: 12
+num_heads: 12
 
 # ── Training (identical across cells A-D) ──────────────────────────
 epochs: 300
-batch_size: 160          # per-GPU
+batch_size: 160
 lr: 0.0002
 warmup_steps: 2000
 grad_clip: 1.0
@@ -24,8 +26,8 @@ ema_decay: 0.9999
 seed: 42
 
 # ── Checkpointing ──────────────────────────────────────────────────
-save_interval: 50        # full training state (latest)
-sample_interval: 50      # sample grid
-snapshot_interval: 50    # EMA-only weight snapshots (FID-vs-steps)
+save_interval: 50
+sample_interval: 50
+snapshot_interval: 50
 num_workers: 4
 resume: true
