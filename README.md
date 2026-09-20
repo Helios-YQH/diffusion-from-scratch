@@ -3,7 +3,7 @@
 从零实现（不依赖 diffusers）的扩散模型项目：用统一的**受控实验**对比 UNet/DDPM、DiT 与
 Rectified Flow 三种骨干与训练目标，配套 FID、NFE 采样效率与现代 ML systems 分析。
 
-当前状态：2×2 实验的代码与协议已冻结（[reports/exp_plan.md](reports/exp_plan.md)），
+当前状态：2×2 受控实验（UNet/DiT × DDPM/rectified flow）的代码与协议已冻结，
 服务器训练进行中；DDPM 基线已在 MNIST 28×28 与 CelebA 64×64 上完成 5-GPU DDP 训练。
 
 | MNIST 28×28（UNet 12M，170 epochs） | CelebA 64×64（UNet 174M，300 epochs） |
@@ -64,7 +64,7 @@ uv run python demo.py --dataset celeba
 │   └── flow.py         # Rectified flow：线性插值路径 / v 损失 / Euler 采样
 ├── configs/            # 四个实验单元 + MNIST 的 YAML 配置
 ├── tests/              # 不变量与形状测试
-├── reports/            # 实验计划（exp_plan.md）与技术报告
+├── reports/            # 实验协议与技术报告（结果出来后补齐）
 ├── figures/            # 结果图
 ├── train.py            # 训练循环、数据管线、EMA、checkpoint、cost accounting
 ├── main.py             # CLI 入口（train / sample）

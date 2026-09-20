@@ -4,8 +4,8 @@ A from-scratch (no `diffusers`) diffusion implementation: a **controlled study**
 backbones / training objectives — UNet + DDPM, DiT, and Rectified Flow — with FID,
 NFE-efficiency curves, and modern ML-systems analysis.
 
-Status: the 2×2 experiment protocol is frozen ([reports/exp_plan.md](reports/exp_plan.md))
-and training is running on a 5-GPU server; the DDPM baseline is complete on MNIST 28×28
+Status: the 2×2 controlled study (UNet/DiT × DDPM/rectified flow) has its code and protocol
+frozen and is training on a 5-GPU server; the DDPM baseline is complete on MNIST 28×28
 and CelebA 64×64.
 
 | MNIST 28×28 (UNet 12M, 170 epochs) | CelebA 64×64 (UNet 174M, 300 epochs) |
@@ -69,7 +69,7 @@ uv run python demo.py --dataset celeba
 │   └── flow.py         # Rectified flow: linear path / v loss / Euler sampling
 ├── configs/            # YAML configs for the four cells + MNIST
 ├── tests/              # Invariant and shape tests
-├── reports/            # Experiment plan (exp_plan.md) and technical report
+├── reports/            # Experiment protocol and technical report (results pending)
 ├── figures/            # Result figures
 ├── train.py            # Training loop, data pipeline, EMA, checkpoints, cost accounting
 ├── main.py             # CLI entry point (train / sample)
