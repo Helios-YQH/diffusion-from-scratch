@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # Cheap-study package: everything the report needs except the CelebA 2x2
-# trainings. Roughly 6-8 GPU-hours, most of it the single DDPM-1000 FID point.
+# trainings. Wall clock ~2.5-3 h on 4 GPUs: the four MNIST cells run in
+# parallel (one per GPU, ~65 min each at fp32), the two expensive ancestral
+# FID sweeps are sharded over the same GPUs, and the single CelebA DDPM-1000
+# point is the remaining big item.
 #
 # Run from the repo root:
 #     bash scripts/cheap_package.sh
@@ -38,17 +41,31 @@ nvidia-smi --query-gpu=index,memory.free,utilization.gpu --format=csv,noheader |
 
 if [ "${SKIP_MNIST:-0}" != "1" ]; then
   echo | tee -a "$LOG"
-  echo "=== 1/5  MNIST 2x2  (4 cells, ~5 min each) ===" | tee -a "$LOG"
+  echo "=== 1/5  MNIST 2x2  (one cell per GPU, in parallel) ===" | tee -a "$LOG"
+  i=0
   for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
-    echo "--- $c" | tee -a "$LOG"
-    $PY main.py train --config "configs/$c.yml" $WANDB_FLAG 2>&1 | tee -a "$LOG"
+    g=$(echo "$GPUS" | cut -d',' -f$((i % NGPU + 1)))
+    i=$((i + 1))
+    echo "--- $c  ->  GPU $g   (per-cell log: logs/train_$c.log)" | tee -a "$LOG"
+    CUDA_VISIBLE_DEVICES="$g" $PY main.py train --config "configs/$c.yml" $WANDB_FLAG \
+        > "logs/train_$c.log" 2>&1 &
+  done
+  wait || true
+  for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
+    echo "--- $c finished:" | tee -a "$LOG"
+    tail -3 "logs/train_$c.log" | tee -a "$LOG"
   done
 
   echo | tee -a "$LOG"
   echo "=== 2/5  MNIST evaluation ===" | tee -a "$LOG"
   $PY eval/fid.py --build-ref --feature-net mnist 2>&1 | tee -a "$LOG"
   for r in mnist_unet_eps mnist_dit_eps; do
-    $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+    if [ "$NGPU" -gt 1 ]; then
+      $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
+          --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+    else
+      $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+    fi
     $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ddim --nfe 10 20 50 2>&1 | tee -a "$LOG"
   done
   for r in mnist_unet_rf mnist_dit_rf; do
