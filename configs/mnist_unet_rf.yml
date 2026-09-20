@@ -1,0 +1,19 @@
+# MNIST cell C: UNet + rectified flow
+dataset: mnist
+backbone: unet
+objective: rf
+
+image_size: 28
+base_channels: 64
+timesteps: 1000        # only used for the eps path; RF ignores it
+
+epochs: 200
+batch_size: 256
+lr: 0.0002
+warmup_steps: 500
+
+save_interval: 50
+sample_interval: 50
+snapshot_interval: 50
+num_workers: 2
+resume: false

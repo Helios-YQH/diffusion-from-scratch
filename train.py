@@ -95,7 +95,7 @@ def to_model_input(batch, device):
     return x
 
 
-def load_mnist(normalize=True):
+def load_mnist(normalize=True, return_labels=False):
     with gzip.open(DATA_PATH, "rb") as f:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*align.*")
@@ -104,7 +104,10 @@ def load_mnist(normalize=True):
     x_train = x_train.reshape(-1, 1, 28, 28).astype(np.float32)
     if normalize:
         x_train = x_train * 2.0 - 1.0  # [0,1] -> [-1,1]
-    return torch.from_numpy(x_train)
+    x = torch.from_numpy(x_train)
+    if return_labels:
+        return x, torch.from_numpy(np.asarray(y_train, dtype=np.int64))
+    return x
 
 
 def save_sample_grid(images, path, nrow=4):

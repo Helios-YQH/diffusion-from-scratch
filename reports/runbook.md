@@ -67,7 +67,7 @@ A GPU that shows `0%` utilisation but holds memory is still someone's allocation
 ```bash
 uv run python tests/test_sanity.py                     # CPU invariants
 
-uv run python main.py train --config configs/mnist.yml \
+uv run python main.py train --config configs/mnist_unet_eps.yml \
     --max-steps 30 --no-resume --run-name smoke_mnist   # ~1 min
 
 uv run python main.py train --config configs/celeba_dit_rf.yml \
@@ -142,6 +142,60 @@ Cost accounting for a finished run:
 uv run python eval/cost.py --config configs/celeba_dit_rf.yml \
   --step-time 1.23 --batch-size 800 --gpu A6000
 ```
+
+## 6b. The cheap package (recommended scope, ~6–8 GPU·h)
+
+Everything the report needs except the CelebA 2×2 trainings. Run in this order.
+
+```bash
+PY="uv run python"        # or an existing env's interpreter
+
+# 1) MNIST 2×2 — all four cells, ~5 min each on one GPU
+for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
+  $PY main.py train --config configs/$c.yml
+done
+
+# 2) MNIST evaluation (reference stats + sampler sweep per cell)
+$PY eval/fid.py --build-ref --feature-net mnist
+for r in mnist_unet_eps mnist_dit_eps; do
+  $PY eval/fid.py --run-name $r --feature-net mnist --sampler ancestral --n 10000
+  $PY eval/fid.py --run-name $r --feature-net mnist --sampler ddim --nfe 10 20 50
+done
+for r in mnist_unet_rf mnist_dit_rf; do
+  $PY eval/fid.py --run-name $r --feature-net mnist --sampler euler --nfe 4 8 16 32 64
+done
+
+# 3) CelebA sampler study on the EXISTING DDPM checkpoint — no training needed.
+#    Requires the old checkpoint on the box (it is not in git):
+#      scp checkpoints/ddpm_celeba_best.pt <host>:dit-sys/checkpoints/
+#    and the data (§2). The 1000-NFE point is the expensive one: ~1 h on 4 GPUs,
+#    ~4 h on one. Every DDIM point is minutes.
+$PY eval/fid.py --build-ref --feature-net inception
+$PY eval/fid.py --run-name ddpm_celeba --sampler ancestral --n 10000
+$PY eval/fid.py --run-name ddpm_celeba --sampler ddim --nfe 10 20 50
+
+# 4) Systems measurements (minutes, no training)
+$PY eval/systems.py --config configs/celeba_dit_rf.yml \
+    --settings fp32 bf16 compile bf16+compile --profile
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+    eval/systems.py --config configs/celeba_dit_rf.yml --ddp --settings fp32
+
+# 5) Figures and tables for the report
+$PY reports/make_figures.py
+$PY eval/make_table.py --out reports/results.md
+```
+
+The four CelebA cells (Section 5) are the expensive half; add them when GPUs allow and the
+same figures/tables absorb them automatically.
+
+## 6c. Building the report
+
+```bash
+cd reports && latexmk -pdf tech_report.tex     # 7 pages now, placeholders auto-fill
+```
+
+`tech_report.tex` includes any figure that exists in `reports/figures/` and renders a
+labelled placeholder box for the rest, so it compiles before the results land.
 
 ## 7. Collecting results
 

@@ -1,0 +1,512 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Diffusion tech report, NeurIPS 2026 formatting (same setup as the CS336
+% assignment-1/2 reports). Compile:  latexmk -pdf tech_report.tex
+%
+% Figures are produced by make_figures.py from results/*.json; missing ones
+% render as a placeholder box so the document always compiles.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass{article}
+
+\PassOptionsToPackage{numbers, compress}{natbib}
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!60},
+  backgroundcolor=\color{gray!8},
+  xleftmargin=1.5em,
+  xrightmargin=1.5em,
+  aboveskip=1.2em,
+  belowskip=1.2em,
+}
+
+\usepackage{caption}
+\captionsetup{font=small}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% Figures that have not been generated yet become a visible placeholder
+% instead of a hard compile error.
+\newcommand{\fig}[2][width=\linewidth]{%
+  \IfFileExists{#2}{\includegraphics[#1]{#2}}{%
+    \fbox{\parbox[c][2.6cm][c]{0.92\linewidth}{\centering\ttfamily\footnotesize
+      \detokenize{#2}\par\vspace{3pt}%
+      not generated yet --- run \detokenize{python reports/make_figures.py}}}%
+  }%
+}
+
+\title{From DDPM to Rectified Flow:\\
+a Measured, From-Scratch Diffusion Study}
+
+\author{%
+  Yi Hou \\
+  University of Chinese Academy of Sciences\\
+  Beijing, China \\
+  \texttt{houyi25@mails.ucas.ac.cn}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report documents a from-scratch implementation and measurement study of the modern
+diffusion stack. No \texttt{diffusers}, \texttt{flash\_attn} or pretrained generative
+component is used: DDPM, DDIM, a diffusion transformer (DiT) with adaLN-Zero conditioning,
+and rectified flow are all implemented in this repository, together with the training
+pipeline, the sampler suite and the evaluation code. The study is organized as a controlled
+2$\times$2 design (UNet vs.\ DiT $\times$ $\epsilon$-prediction vs.\ rectified flow) at two
+scales, MNIST $28\times28$ and CelebA $64\times64$, with all cells trained under one frozen
+protocol. Headline numbers: TODO (FID at matched NFE for DDPM/DDIM/rectified flow; the
+sampler that reaches the same FID with the fewest function evaluations and its measured
+samples-per-second; the step-time effect of mixed precision and compilation; and a
+reverse benchmark showing where sharding stops paying off at this model scale).
+\end{abstract}
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+Diffusion models are usually consumed through a library: a scheduler object, a pretrained
+backbone, a pipeline. This report takes the opposite route. Everything is built from
+scratch --- the forward and reverse processes, the two backbones, both training objectives,
+the samplers and the evaluation --- and every claim is backed by a measurement produced by
+this repository.
+
+The study asks three questions:
+
+\begin{itemize}
+  \item \textbf{RQ1 (architecture).} At a similar parameter scale, does replacing a UNet
+        with a transformer (DiT) backbone help or hurt generation quality and computational
+        efficiency?
+  \item \textbf{RQ2 (objective and sampler).} How does a rectified-flow objective change the
+        quality--NFE trade-off, and how much does sampler choice alone buy for a fixed
+        trained model (DDPM ancestral vs.\ DDIM)?
+  \item \textbf{RQ3 (systems).} How much training and inference throughput can be recovered
+        by mixed precision, compilation and kernel-level fusion at this scale --- and where
+        does a distributed strategy stop being worth it?
+\end{itemize}
+
+Section~\ref{sec:background} puts the three objectives on a common footing.
+Section~\ref{sec:implementation} describes the implementation,
+Section~\ref{sec:setup} the frozen protocol and the evaluation protocol,
+Sections~\ref{sec:samplers}--\ref{sec:systems} the results, and
+Section~\ref{sec:failures} collects the experiments that failed, which were as instructive
+as the ones that worked.
+
+\begin{table}[t]
+  \caption{Results at a glance. Values marked \texttt{--} are still being measured; the
+  raw archives live in \texttt{results/*.json}.}
+  \label{tab:glance}
+  \centering
+  \small
+  \begin{tabular}{@{}llp{0.5\linewidth}@{}}
+    \toprule
+    Question & Baseline & Measured effect \\
+    \midrule
+    RQ1 backbone & UNet (174.1M, 67.8 GFLOPs/sample) &
+      DiT (129.6M, 43.6 GFLOPs/sample): FID \texttt{--} vs.\ \texttt{--}; step time
+      \texttt{--} \\
+    RQ2 objective & $\epsilon$-prediction &
+      rectified flow: FID \texttt{--} vs.\ \texttt{--} at equal NFE \\
+    RQ2 sampler & DDPM ancestral (1000 NFE) &
+      DDIM: FID \texttt{--} at \texttt{--} NFE for the same weights \\
+    RQ3 systems & FP32, uncompiled &
+      BF16 \texttt{--}$\times$; \texttt{torch.compile} \texttt{--}$\times$; MFU
+      \texttt{--}\% \\
+    RQ3 scaling & DDP & FSDP reverse benchmark: \texttt{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%=============================================================================
+\section{Background: one path, three objectives}
+\label{sec:background}
+%=============================================================================
+
+All three methods place the data and the noise at the ends of an interpolation path and
+train a network to regress a target along it. They differ in the path, in the target, and in
+the solver used to walk back from noise to data.
+
+\begin{table}[t]
+  \caption{The three objectives on a common footing. $\bar\alpha_t$ is the usual DDPM
+  cumulative product; the flow variant uses a continuous $t\in[0,1]$.}
+  \label{tab:objectives}
+  \centering
+  \small
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    Method & Path $x_t$ & Target & Sampler (NFE) \\
+    \midrule
+    DDPM~\citep{ho2020ddpm} & $\sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$
+      & $\epsilon$ & ancestral, stochastic (1000) \\
+    DDIM~\citep{song2020ddim} & same & $\epsilon$ & deterministic ODE (10--50) \\
+    Rectified flow~\citep{liu2022flow,lipman2022fm} & $(1-t)\,x_0 + t\,\epsilon$
+      & $v = \epsilon - x_0$ & Euler ODE (4--128) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \fig[width=2.65in]{figures/paths.pdf}
+  \caption{The diffusion path and the rectified-flow path between data and noise. The flow
+  objective regresses a constant velocity along a straight line; the diffusion objective
+  traverses a curved, non-uniform-speed path.}
+  \label{fig:paths}
+\end{figure}
+
+One implementation detail is easy to get wrong and worth stating: the sinusoidal timestep
+embedding used by both backbones is calibrated for $t \in [0, 1000]$ (the DDPM range). The
+flow code therefore keeps its path mathematics in $t\in[0,1]$ but passes $t\times1000$ to the
+network; without that scaling the embedding is nearly constant and conditioning collapses.
+
+%=============================================================================
+\section{Implementation}
+\label{sec:implementation}
+%=============================================================================
+
+Everything is written in PyTorch, with no generative-model library. Table~\ref{tab:models}
+lists the measured sizes. Note that the parameter ranking and the FLOPs ranking disagree
+across scales --- on CelebA the UNet is larger on both axes, on MNIST it has fewer
+parameters but more FLOPs --- which is exactly why both are reported.
+
+\begin{table}[t]
+  \caption{Measured sizes (forward pass, one sample at the model's native resolution).
+  Params and FLOPs are counted by \texttt{eval/cost.py} with
+  \texttt{torch.utils.flop\_counter}, so both backbones are measured with the same tool.}
+  \label{tab:models}
+  \centering
+  \small
+  \begin{tabular}{@{}llrrrr@{}}
+    \toprule
+    Dataset & Backbone & Params & GFLOPs/sample & Conditioning & Attention \\
+    \midrule
+    MNIST $28^2$ & UNet & 11.7M & 2.43 & sinusoidal + MLP & bottleneck \\
+    MNIST $28^2$ & DiT  & 16.5M & 1.05 & adaLN-Zero          & all 6 blocks (49 tokens) \\
+    CelebA $64^2$ & UNet & 174.1M & 67.8 & sinusoidal + MLP & bottleneck \\
+    CelebA $64^2$ & DiT  & 129.6M & 43.6 & adaLN-Zero          & all 12 blocks (256 tokens) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Backbones.} The UNet is a residual U-net with GroupNorm, SiLU, sinusoidal timestep
+injection into every residual block, and \texttt{scaled\_dot\_product\_attention} at the
+bottleneck. The DiT follows \citet{peebles2023dit}: patchify with a strided convolution,
+fixed two-dimensional sincos positional embeddings, and blocks whose attention and MLP are
+modulated by an adaLN-Zero MLP that is zero-initialized, so every block starts as the
+identity (verified in \texttt{tests/test\_sanity.py}: the untrained model outputs exactly
+zero). Attention uses PyTorch SDPA in both backbones; no fused-attention library is used.
+
+\textbf{Training.} A single training loop drives both objectives. It supports torchrun DDP,
+YAML configs, checkpoint resume, an exponential moving average of the weights (all reported
+FID uses EMA weights), per-epoch EMA-only snapshots for quality-vs-progress curves, and cost
+accounting: parameters, measured FLOPs, step time, throughput, peak memory and MFU are
+written to \texttt{results/<run>.json} on every run.
+
+\textbf{Samplers.} Ancestral DDPM sampling, deterministic DDIM sampling with a configurable
+NFE, and Euler integration of the flow ODE. All three reuse the same trained \(\epsilon\)- or
+velocity-predicting network, so they can be compared at fixed weights.
+
+%=============================================================================
+\section{Experimental setup}
+\label{sec:setup}
+%=============================================================================
+
+\textbf{Hardware.} TODO: fill in the machine actually used (GPU model, interconnect,
+NUMA layout). The topology matters: on the six-A6000 node used for the systems numbers,
+GPUs 0--3 and 4--5 sit in different NUMA domains and the cross-domain link is an order of
+magnitude slower, which is why \texttt{NCCL\_P2P\_DISABLE=1} is required and why DDP is kept
+inside one domain.
+
+\textbf{Protocol.} All cells of a scale share one frozen protocol: identical optimizer,
+learning-rate schedule, batch size (global), EMA decay and seed (Table~\ref{tab:protocol}).
+Unlike recipes that tune each cell separately, this design means a difference between cells
+is attributable to the backbone or the objective rather than to the optimizer.
+
+\begin{table}[t]
+  \caption{The frozen protocol. Any deviation is recorded in the run's JSON.}
+  \label{tab:protocol}
+  \centering
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    & MNIST $28^2$ & CelebA $64^2$ \\
+    \midrule
+    Cells & \multicolumn{2}{l}{UNet/DiT $\times$ $\epsilon$/flow, one run each} \\
+    Epochs & 200 & 300 \\
+    Global batch & 256 & 800 (160 per GPU $\times$ 5) \\
+    Optimizer & \multicolumn{2}{l}{Adam, lr $2\times10^{-4}$, warmup then cosine to $10^{-6}$} \\
+    Gradient clipping & \multicolumn{2}{l}{1.0} \\
+    EMA decay & \multicolumn{2}{l}{0.9999, applied in every cell} \\
+    Seed & \multicolumn{2}{l}{42} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{FID protocol.} Reference statistics are computed from the training tensor itself
+(\texttt{data/celeba\_64\_uint8.pt} for CelebA, the MNIST training split for MNIST) with the
+same preprocessing chain used to evaluate samples; third-party statistics are never used,
+because any difference in resizing makes the numbers incomparable. CelebA uses the standard
+Inception-v3 pool3 features at $299^2$. Inception features are not meaningful for
+grayscale digits, so the MNIST cells are evaluated in the feature space of a small
+convolutional classifier trained on MNIST inside this repository
+(Table~\ref{tab:protocol} footnote); that metric is \emph{non-standard} and only comparable
+within this report. Tier~1 evaluations use 10k samples, Tier~2 (final) 50k, and the spread
+is reported as the variability across five random 10k subsets.
+
+%=============================================================================
+\section{Sampler study (RQ2)}
+\label{sec:samplers}
+%=============================================================================
+
+\begin{figure}[t]
+  \centering
+  \fig[width=2.65in]{figures/fid_vs_nfe.pdf}
+  \caption{Quality as a function of the number of function evaluations, across generative
+  trajectories. DDPM vs.\ DDIM is a same-weights sampler ablation; comparisons across cells
+  additionally change the training objective.}
+  \label{fig:fid_nfe}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fig[width=2.65in]{figures/throughput_vs_nfe.pdf}
+  \caption{Sampling throughput against NFE, measured on the same runs.}
+  \label{fig:throughput}
+\end{figure}
+
+TODO: table of (sampler, NFE, FID, samples/s, projected wall-clock for 50k samples) plus the
+prose reading of Fig.~\ref{fig:fid_nfe}. Fill from \texttt{results/fid\_*.json}
+(\texttt{eval/make\_table.py} prints the table).
+
+%=============================================================================
+\section{Backbone and objective (RQ1)}
+\label{sec:backbone}
+%=============================================================================
+
+\begin{table}[t]
+  \caption{The 2$\times$2 design. FID at each cell's best NFE; see the text for how the
+  NFE was chosen.}
+  \label{tab:2x2}
+  \centering
+  \small
+  \begin{tabular}{@{}llrr@{}}
+    \toprule
+    Dataset & Cell & FID & NFE at that FID \\
+    \midrule
+    MNIST & A: UNet + $\epsilon$   & \texttt{--} & \texttt{--} \\
+    MNIST & B: DiT + $\epsilon$    & \texttt{--} & \texttt{--} \\
+    MNIST & C: UNet + flow         & \texttt{--} & \texttt{--} \\
+    MNIST & D: DiT + flow          & \texttt{--} & \texttt{--} \\
+    CelebA & A: UNet + $\epsilon$  & \texttt{--} & \texttt{--} \\
+    CelebA & B: DiT + $\epsilon$   & \texttt{--} & \texttt{--} \\
+    CelebA & C: UNet + flow        & \texttt{--} & \texttt{--} \\
+    CelebA & D: DiT + flow         & \texttt{--} & \texttt{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \fig[width=\linewidth]{figures/samples.png}
+  \caption{EMA samples from each cell's final checkpoint.}
+  \label{fig:samples}
+\end{figure}
+
+TODO: prose. State explicitly that parameter count is not compute: report the FLOPs column
+from Table~\ref{tab:models} alongside every quality comparison, and note that the CelebA
+cells are the expensive ones (measured training cost in Table~\ref{tab:cost}).
+
+%=============================================================================
+\section{Systems (RQ3)}
+\label{sec:systems}
+%=============================================================================
+
+\begin{table}[t]
+  \caption{Training step cost under each execution setting (30 steps, 5 warmups discarded).
+  Produced by \texttt{eval/systems.py}; the FID column is the check that a speedup did not
+  silently cost quality.}
+  \label{tab:cost}
+  \centering
+  \small
+  \begin{tabular}{@{}llrrrr@{}}
+    \toprule
+    Config & Setting & ms/step & img/s & peak GB & MFU \\
+    \midrule
+    TODO & FP32 & & & & \\
+    TODO & BF16 & & & & \\
+    TODO & compile & & & & \\
+    TODO & BF16 + compile & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \fig[width=2.65in]{figures/systems_settings.pdf}
+  \caption{Step time by execution setting.}
+  \label{fig:settings}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fig[width=2.65in]{figures/profile_breakdown.pdf}
+  \caption{Where GPU time goes in a diffusion training step, by kernel category. The
+  measurement is a matmul/conv accounting only: elementwise-heavy operations
+  (GroupNorm, SiLU, adaLN modulation) are exactly the ones a per-kernel profile reveals and
+  a FLOPs count hides.}
+  \label{fig:profile}
+\end{figure}
+
+TODO: the profile-first argument --- which category dominated, what optimization it implied,
+and what the optimization actually returned. Then the distributed measurement: DDP step time
+and the NCCL share, and the FSDP reverse benchmark at this parameter scale (expected to be
+slower; the point is to measure and report it). Note the MFU caveat: the counter covers
+matmul and convolution work only, so "MFU" here is a matmul-utilisation proxy.
+
+%=============================================================================
+\section{What didn't work}
+\label{sec:failures}
+%=============================================================================
+
+Each entry follows the same shape: hypothesis, setup, observation, diagnosis, resolution,
+lesson.
+
+\textbf{Learning rate $5\times10^{-4}$ collapses CelebA training.} TODO: fill in with the
+observed loss/grad-norm curves; resolution was $2\times10^{-4}$ with gradient clipping at
+1.0.
+
+\textbf{DataParallel deadlocks with a multi-worker DataLoader.} TODO: describe the hang and
+the migration to torchrun-native DDP.
+
+\textbf{P2P hangs on this node's NUMA layout.} TODO: NCCL\_P2P\_DISABLE=1, and what the
+topology measurement showed.
+
+\textbf{FSDP at this scale.} TODO: reverse benchmark numbers (expected: communication
+overhead without meaningful memory savings at $\sim$130--174M parameters).
+
+%=============================================================================
+\section{Discussion and limitations}
+\label{sec:limitations}
+%=============================================================================
+
+\begin{itemize}
+  \item Unconditional generation only: no classifier-free guidance, no text conditioning.
+  \item Two datasets, one resolution each; the CelebA $2\times2$ is the expensive half and
+        its status is stated explicitly in each table.
+  \item FID is computed against reference statistics built from this repository's own
+        preprocessing chain. Absolute values are therefore \emph{not} comparable with
+        published numbers; only comparisons within this report are meaningful.
+  \item The MNIST metric is a non-standard feature-space distance.
+  \item One seed per cell; the reported spread is FID variability across data subsets, not
+        across seeds.
+  \item FLOPs counts exclude elementwise work, so MFU figures are a proxy.
+\end{itemize}
+
+%=============================================================================
+\section*{Reproduction}
+%=============================================================================
+
+All commands (environment, data, smoke tests, launching cells, evaluation) are in
+\texttt{reports/runbook.md}; the raw archive behind every number is \texttt{results/*.json};
+the committed code contains the full training stack and the test suite used to validate the
+implementations (\texttt{tests/test\_sanity.py}, 14 CPU-only invariants).
+
+\begin{thebibliography}{9}
+
+\bibitem{ho2020ddpm}
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock \emph{NeurIPS}, 2020.
+
+\bibitem{song2020ddim}
+Jiaming Song, Chenlin Meng, and Stefano Ermon.
+\newblock Denoising diffusion implicit models.
+\newblock \emph{ICLR}, 2021.
+
+\bibitem{song2021sde}
+Yang Song, Jascha Sohl-Dickstein, Diederik P. Kingma, Abhishek Kumar, Stefano Ermon, and
+Ben Poole.
+\newblock Score-based generative modeling through stochastic differential equations.
+\newblock \emph{ICLR}, 2021.
+
+\bibitem{nichol2021improved}
+Alexander Quinn Nichol and Prafulla Dhariwal.
+\newblock Improved denoising diffusion probabilistic models.
+\newblock \emph{ICML}, 2021.
+
+\bibitem{ho2022cfg}
+Jonathan Ho and Tim Salimans.
+\newblock Classifier-free diffusion guidance.
+\newblock \emph{arXiv:2207.12598}, 2022.
+
+\bibitem{rombach2022ldm}
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Bj\"orn Ommer.
+\newblock High-resolution image synthesis with latent diffusion models.
+\newblock \emph{CVPR}, 2022.
+
+\bibitem{peebles2023dit}
+William Peebles and Saining Xie.
+\newblock Scalable diffusion models with transformers.
+\newblock \emph{ICCV}, 2023.
+
+\bibitem{liu2022flow}
+Xingchao Liu, Chengyue Gong, and Qiang Liu.
+\newblock Flow straight and fast: learning to generate and transfer data with rectified
+flow.
+\newblock \emph{ICLR}, 2023.
+
+\bibitem{lipman2022fm}
+Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matthew Le.
+\newblock Flow matching for generative modeling.
+\newblock \emph{ICLR}, 2023.
+
+\bibitem{esser2024sd3}
+Patrick Esser et al.
+\newblock Scaling rectified flow transformers for high-resolution image synthesis.
+\newblock \emph{ICML}, 2024.
+
+\bibitem{heusel2017fid}
+Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter.
+\newblock GANs trained by a two time-scale update rule converge to a local Nash equilibrium.
+\newblock \emph{NeurIPS}, 2017.
+
+\bibitem{dao2022flash}
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher R\'e.
+\newblock FlashAttention: fast and memory-efficient exact attention with IO-awareness.
+\newblock \emph{NeurIPS}, 2022.
+
+\bibitem{rajbhandari2020zero}
+Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He.
+\newblock ZeRO: memory optimizations toward training trillion parameter models.
+\newblock \emph{SC20}, 2020.
+
+\bibitem{zhao2023fsdp}
+Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min Xu, Less Wright,
+Hamid Shojanazeri, Myle Ott, Sam Shleifer, et al.
+\newblock PyTorch FSDP: experiences on scaling fully sharded data parallel.
+\newblock \emph{VLDB}, 2023.
+
+\end{thebibliography}
+
+\end{document}

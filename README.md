@@ -34,8 +34,11 @@ uv sync --extra log  # 额外安装 wandb（训练日志）
 ## 快速开始
 
 ```bash
-# MNIST 冒烟（单卡）
-uv run python main.py train --config configs/mnist.yml
+# MNIST 2×2（四个单元，每格约 5 分钟；也是最快的冒烟路径）
+uv run python main.py train --config configs/mnist_unet_eps.yml
+uv run python main.py train --config configs/mnist_dit_eps.yml
+uv run python main.py train --config configs/mnist_unet_rf.yml
+uv run python main.py train --config configs/mnist_dit_rf.yml
 
 # CelebA 2×2 受控实验的四个单元
 uv run python main.py train --config configs/celeba_unet_eps.yml   # A: UNet + DDPM

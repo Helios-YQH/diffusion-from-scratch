@@ -38,8 +38,11 @@ uv sync --extra log  # extra: wandb (training logs)
 ## Quick Start
 
 ```bash
-# MNIST smoke run (single GPU)
-uv run python main.py train --config configs/mnist.yml
+# MNIST 2x2 (four cells, ~5 min each; also the fastest smoke path)
+uv run python main.py train --config configs/mnist_unet_eps.yml
+uv run python main.py train --config configs/mnist_dit_eps.yml
+uv run python main.py train --config configs/mnist_unet_rf.yml
+uv run python main.py train --config configs/mnist_dit_rf.yml
 
 # The four cells of the CelebA 2x2 study
 uv run python main.py train --config configs/celeba_unet_eps.yml   # A: UNet + DDPM
