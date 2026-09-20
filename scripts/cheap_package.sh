@@ -16,6 +16,11 @@
 #     N=10000        samples per FID evaluation
 #     WANDB=1        pass --wandb to training runs (needs WANDB_API_KEY)
 #     SKIP_MNIST=1 | SKIP_CELEBA=1 | SKIP_SYSTEMS=1
+#     FORCE=1        redo stages whose outputs already exist
+#
+# The script is restart-safe: a stage (or a single MNIST cell) whose results
+# JSON already exists is skipped, so re-running after a crash resumes instead
+# of starting over. Completed stages are detected from results/*.json.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -29,6 +34,9 @@ export NCCL_P2P_DISABLE=1
 
 WANDB_FLAG=""
 if [ "${WANDB:-0}" = "1" ]; then WANDB_FLAG="--wandb"; fi
+
+# have <path>: true when the stage that writes <path> is already done
+have() { [ "${FORCE:-0}" = "1" ] && return 1; [ -f "$1" ]; }
 
 if [ ! -f main.py ]; then echo "run me from the repo root"; exit 1; fi
 mkdir -p logs results samples checkpoints
@@ -46,6 +54,10 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
   for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
     g=$(echo "$GPUS" | cut -d',' -f$((i % NGPU + 1)))
     i=$((i + 1))
+    if have "results/$c.json"; then
+      echo "--- $c already trained (results/$c.json exists) — skipping" | tee -a "$LOG"
+      continue
+    fi
     echo "--- $c  ->  GPU $g   (per-cell log: logs/train_$c.log)" | tee -a "$LOG"
     CUDA_VISIBLE_DEVICES="$g" $PY main.py train --config "configs/$c.yml" $WANDB_FLAG \
         > "logs/train_$c.log" 2>&1 &
@@ -53,13 +65,16 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
   wait || true
   for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
     echo "--- $c finished:" | tee -a "$LOG"
-    tail -3 "logs/train_$c.log" | tee -a "$LOG"
+    tail -3 "logs/train_$c.log" 2>/dev/null | tee -a "$LOG"
   done
 
   echo | tee -a "$LOG"
   echo "=== 2/5  MNIST evaluation ===" | tee -a "$LOG"
   $PY eval/fid.py --build-ref --feature-net mnist 2>&1 | tee -a "$LOG"
   for r in mnist_unet_eps mnist_dit_eps; do
+    if have "results/fid_$r.json"; then
+      echo "  fid_$r already done — skipping" | tee -a "$LOG"; continue
+    fi
     if [ "$NGPU" -gt 1 ]; then
       $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
           --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
@@ -69,6 +84,9 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
     $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ddim --nfe 10 20 50 2>&1 | tee -a "$LOG"
   done
   for r in mnist_unet_rf mnist_dit_rf; do
+    if have "results/fid_$r.json"; then
+      echo "  fid_$r already done — skipping" | tee -a "$LOG"; continue
+    fi
     $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler euler --nfe 4 8 16 32 64 2>&1 | tee -a "$LOG"
   done
 fi
@@ -78,6 +96,8 @@ if [ "${SKIP_CELEBA:-0}" != "1" ]; then
   echo "=== 3/5  CelebA sampler study (no training) ===" | tee -a "$LOG"
   if [ ! -f checkpoints/ddpm_celeba_best.pt ]; then
     echo "  [skip] checkpoints/ddpm_celeba_best.pt is missing" | tee -a "$LOG"
+  elif have "results/fid_ddpm_celeba.json"; then
+    echo "  fid_ddpm_celeba.json already exists — skipping (FORCE=1 to redo)" | tee -a "$LOG"
   else
     $PY eval/fid.py --build-ref --feature-net inception 2>&1 | tee -a "$LOG"
     for nfe in 10 20 50; do
@@ -96,11 +116,15 @@ fi
 if [ "${SKIP_SYSTEMS:-0}" != "1" ]; then
   echo | tee -a "$LOG"
   echo "=== 4/5  systems measurements ===" | tee -a "$LOG"
-  $PY eval/systems.py --config configs/celeba_dit_rf.yml \
-      --settings fp32 bf16 compile bf16+compile --profile 2>&1 | tee -a "$LOG"
-  if [ "$NGPU" -gt 1 ]; then
-    $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/systems.py \
-        --config configs/celeba_dit_rf.yml --ddp --settings fp32 2>&1 | tee -a "$LOG"
+  if have "results/systems_celeba_dit_rf.json"; then
+    echo "  systems_celeba_dit_rf.json already exists — skipping (FORCE=1 to redo)" | tee -a "$LOG"
+  else
+    $PY eval/systems.py --config configs/celeba_dit_rf.yml \
+        --settings fp32 bf16 compile bf16+compile --profile 2>&1 | tee -a "$LOG"
+    if [ "$NGPU" -gt 1 ]; then
+      $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/systems.py \
+          --config configs/celeba_dit_rf.yml --ddp --settings fp32 2>&1 | tee -a "$LOG"
+    fi
   fi
 fi
 
