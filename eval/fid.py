@@ -306,7 +306,7 @@ def main():
     tag = args.tag or f"{args.weights}-{args.sampler}"
     out_path = os.path.join(RESULTS_DIR, f"fid_{run_name}.json")
     if os.path.exists(out_path):
-        with open(out_path) as f:
+        with open(out_path, encoding="utf-8") as f:
             records = json.load(f).get("runs", [])
 
     for nfe in args.nfe:
@@ -338,7 +338,7 @@ def main():
                             "weights": args.weights, "fid": fid,
                             "git_commit": _git_commit()})
             os.makedirs(RESULTS_DIR, exist_ok=True)
-            with open(out_path, "w") as f:
+            with open(out_path, "w", encoding="utf-8") as f:
                 json.dump({"run_name": run_name, "runs": sorted(
                     records, key=lambda r: r["nfe"])}, f, indent=2)
             print(f"  written: {out_path}")

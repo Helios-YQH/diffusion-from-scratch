@@ -50,7 +50,7 @@ def _load_yaml_config(path):
             "YAML config support requires PyYAML. Install it first:\n"
             "  pip install pyyaml   (or: uv sync)"
         )
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict):
         raise ValueError(f"Config file {path} must be a YAML mapping, got {type(cfg)}")
@@ -109,9 +109,9 @@ def build_parser(config_path):
     parser.add_argument("--use-raw", action="store_true", default=False,
                         help="Sample with raw weights instead of EMA")
     parser.add_argument("--save-interval", type=int, default=10,
-                        help="Save full training state every N epochs")
+                        help="Save full training state every N epochs (0 = final epoch only)")
     parser.add_argument("--sample-interval", type=int, default=10,
-                        help="Generate sample grid every N epochs")
+                        help="Generate a sample grid every N epochs (0 = off)")
     parser.add_argument("--snapshot-interval", type=int, default=0,
                         help="Save EMA-only weight snapshots every N epochs "
                              "(0 = off; for FID-vs-steps curves)")

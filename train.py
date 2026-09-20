@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from diffusion.ddpm import DDPM
 from diffusion.flow import RectifiedFlow
+from eval.cost import count_flops, detect_peak_flops, mfu
 from models.dit import DiT
 from models.unet import UNet
 
@@ -274,6 +275,16 @@ def _git_commit():
         return "unknown"
 
 
+def _safe_count_flops(model, img_size, img_channels, device, is_main):
+    """Forward FLOPs for one sample; returns None if the counter fails."""
+    try:
+        return count_flops(model, img_size, img_channels, device=device)
+    except Exception as e:
+        if is_main:
+            print(f"  [warn] FLOPs measurement failed ({e}); continuing without it.")
+        return None
+
+
 def _init_wandb(args, run_name, arch_cfg, is_main):
     """Optional Weights & Biases logging. Returns (wandb_module, run)."""
     if not getattr(args, "wandb", False) or not is_main:
@@ -393,6 +404,8 @@ def train(args):
 
     model_for_save = model.module if is_distributed else model
     n_params = sum(p.numel() for p in model_for_save.parameters())
+    flops_per_sample = _safe_count_flops(model_for_save, img_size, img_channels,
+                                         device, is_main)
     best_loss = float("inf")
     start_epoch = 1
     resumed_state = None
@@ -412,8 +425,10 @@ def train(args):
     }
 
     if is_main:
+        fl = (f"  {flops_per_sample / 1e9:.1f} GFLOPs/sample"
+              if flops_per_sample else "")
         print(f"Run: {run_name}  backbone={args.backbone}  "
-              f"objective={args.objective}  params={n_params / 1e6:.1f}M")
+              f"objective={args.objective}  params={n_params / 1e6:.1f}M{fl}")
 
     wandb, wb = _init_wandb(args, run_name, arch_cfg, is_main)
 
@@ -549,15 +564,16 @@ def train(args):
                                     kind=f"epoch{epoch}", ema_only=True)
                 print(f"  Snapshot: {path}")
 
-            # Periodic full training state
-            if epoch % save_interval == 0 or epoch == args.epochs:
+            # Periodic full training state (save_interval = 0 -> final epoch only)
+            if epoch == args.epochs or (save_interval and epoch % save_interval == 0):
                 path = save_checkpoint(model_for_save, opt, scheduler,
                                        epoch, best_loss, run_name,
                                        arch_cfg, global_step, ema=ema)
                 print(f"  Training state saved: {path}")
 
-            # Sample grid (EMA weights)
-            if epoch % sample_interval == 0 or epoch == args.epochs:
+            # Sample grid (EMA weights); sample_interval = 0 disables it
+            if sample_interval and (epoch % sample_interval == 0
+                                    or epoch == args.epochs):
                 with ema.applied_to(model_for_save):
                     samples = diffusion.sample(16)
                 grid_path = os.path.join("samples", f"{run_name}_epoch{epoch}.png")
@@ -579,10 +595,20 @@ def train(args):
         if str(device).startswith("cuda"):
             peak_gb = torch.cuda.max_memory_allocated(torch.device(device)) / 1e9
         step_time = epoch_time / max(num_batches, 1)
+        global_batch = args.batch_size * world_size
+
+        peak_flops, gpu_name = detect_peak_flops("bf16")
+        mfu_val = None
+        if flops_per_sample and step_time > 0 and peak_flops:
+            mfu_val = mfu(flops_per_sample, global_batch, step_time, peak_flops)
+
         print(f"\nModel: {args.backbone}  Params: {n_params / 1e6:.1f}M")
-        print(f"Training: batch {args.batch_size * world_size} | "
-              f"{step_time:.3f} s/step | {throughput:.0f} img/s | "
-              f"peak {peak_gb:.1f} GB")
+        if flops_per_sample:
+            print(f"FLOPs:  {flops_per_sample / 1e9:.2f} GFLOPs/sample (forward)")
+        print(f"Training: batch {global_batch} | {step_time:.3f} s/step | "
+              f"{throughput:.0f} img/s | peak {peak_gb:.1f} GB")
+        if mfu_val is not None:
+            print(f"MFU:    {mfu_val * 100:.1f}%  (bf16 dense peak on {gpu_name})")
 
         summary = {
             "run_name": run_name,
@@ -591,7 +617,8 @@ def train(args):
             "dataset": args.dataset,
             "epochs": args.epochs,
             "params": n_params,
-            "global_batch_size": args.batch_size * world_size,
+            "forward_flops_per_sample": flops_per_sample,
+            "global_batch_size": global_batch,
             "world_size": world_size,
             "final_avg_loss": avg_loss,
             "final_grad_norm": avg_gnorm,
@@ -599,12 +626,14 @@ def train(args):
             "step_time_s": step_time,
             "throughput_img_s": throughput,
             "peak_memory_gb": peak_gb,
+            "mfu": mfu_val,
+            "gpu_name": gpu_name,
             "git_commit": _git_commit(),
             "config": {k: v for k, v in vars(args).items()},
         }
         os.makedirs(RESULTS_DIR, exist_ok=True)
         out_path = os.path.join(RESULTS_DIR, f"{run_name}.json")
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, default=str)
         print(f"Results written: {out_path}")
 
