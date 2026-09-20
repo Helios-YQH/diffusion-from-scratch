@@ -7,3 +7,4 @@ wandb/
 TODO.md
 reports/exp_plan.md
 .env
+eval/stats/

@@ -55,8 +55,12 @@ def extract_celeba():
 
 
 def preprocess_celeba(image_size=32):
-    """Resize + normalize all CelebA images into a single .pt file."""
-    cache_path = os.path.join("data", f"celeba_{image_size}.pt")
+    """Resize all CelebA images into a uint8 .pt cache.
+
+    Images are stored as uint8 [0, 255] and normalized to [-1, 1] on the fly
+    in the training loop: the cache is ~2.5GB instead of ~10GB in float32.
+    """
+    cache_path = os.path.join("data", f"celeba_{image_size}_uint8.pt")
     if os.path.exists(cache_path):
         print(f"Loading preprocessed cache: {cache_path}")
         return torch.load(cache_path, weights_only=True)
@@ -73,14 +77,21 @@ def preprocess_celeba(image_size=32):
     for f in tqdm(files, desc="Preprocessing", ncols=80):
         img = Image.open(f).convert("RGB")
         img = img.resize((image_size, image_size), Image.BILINEAR)
-        arr = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
-        arr = arr * 2.0 - 1.0  # [-1, 1]
+        arr = np.array(img, dtype=np.uint8)  # HWC, [0, 255]
         tensors.append(torch.from_numpy(arr.transpose(2, 0, 1)))
 
     data = torch.stack(tensors)
     torch.save(data, cache_path)
-    print(f"Saved {cache_path}  ({data.shape})")
+    print(f"Saved {cache_path}  ({data.shape}, uint8)")
     return data
+
+
+def to_model_input(batch, device):
+    """uint8 [0,255] -> float [-1,1] on the training device."""
+    x = batch.to(device, non_blocking=True)
+    if x.dtype == torch.uint8:
+        x = x.float().div_(127.5).sub_(1.0)
+    return x
 
 
 def load_mnist(normalize=True):
@@ -488,7 +499,7 @@ def train(args):
                     ncols=80, disable=not is_main)
 
         for batch in pbar:
-            x0 = batch[0].to(device, non_blocking=True)
+            x0 = to_model_input(batch[0], device)
             loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
