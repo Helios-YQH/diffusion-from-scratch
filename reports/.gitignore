@@ -12,3 +12,6 @@ figures/*.png
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+
+# The sample grid is a real figure (raster), not a throwaway preview
+!figures/samples.png

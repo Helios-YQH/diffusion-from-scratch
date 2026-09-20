@@ -5,7 +5,7 @@ Rectified Flow 三种骨干与训练目标，配套 FID、NFE 采样效率与现
 
 当前状态：2×2 受控实验（UNet/DiT × DDPM/rectified flow）的代码、评估与协议已就绪，
 训练待 GPU 空闲后进行；DDPM 基线已在 MNIST 28×28 与 CelebA 64×64 上完成 5-GPU DDP 训练。
-实验计划见 [reports/technical_report.md](reports/technical_report.md)（结果待填），
+技术报告骨架见 [reports/tech_report.tex](reports/tech_report.tex)（NeurIPS 格式，结果待填），
 执行步骤见 [reports/runbook.md](reports/runbook.md)。
 
 | MNIST 28×28（UNet 12M，170 epochs） | CelebA 64×64（UNet 174M，300 epochs） |

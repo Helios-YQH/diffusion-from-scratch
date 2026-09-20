@@ -6,8 +6,9 @@ NFE-efficiency curves, and modern ML-systems analysis.
 
 Status: the 2×2 controlled study (UNet/DiT × DDPM/rectified flow) has its code, evaluation
 and protocol ready — training runs as soon as GPUs are free; the DDPM baseline is complete on
-MNIST 28×28 and CelebA 64×64. See [reports/technical_report.md](reports/technical_report.md)
-(results pending) and [reports/runbook.md](reports/runbook.md).
+MNIST 28×28 and CelebA 64×64. The report skeleton is
+[reports/tech_report.tex](reports/tech_report.tex) (NeurIPS format, results pending);
+the runbook is [reports/runbook.md](reports/runbook.md).
 
 | MNIST 28×28 (UNet 12M, 170 epochs) | CelebA 64×64 (UNet 174M, 300 epochs) |
 |---|---|
