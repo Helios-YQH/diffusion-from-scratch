@@ -14,10 +14,13 @@ if pgrep -f "[c]heap_package.sh" >/dev/null; then
 else
   echo "cheap_package.sh : not running (finished, or stopped)"
 fi
-pgrep -af "[m]ain.py train" | sed 's|.*configs/|  train : |;s|\.yml.*||'
-pgrep -af "[e]val/fid.py" | sed 's|.*eval/fid.py|  fid   :|' | cut -c1-120
-pgrep -af "[e]val/systems.py" | sed 's|.*eval/systems.py|  sys   :|' | cut -c1-120
-pgrep -af "[t]orchrun" | head -2 | sed 's|^[0-9]* /mnt/[^ ]*torchrun|  torchrun :|' | cut -c1-120
+# NOTE: filter out this script's own pipeline (its sed/pgrep command lines
+# contain the very strings we are searching for).
+ps -eo args= | grep -vE "status\.sh|sed |pgrep |grep " | \
+  grep -E "main\.py train|eval/fid\.py|eval/systems\.py|torchrun" | \
+  sed 's|/mnt/14T/houyi/miniconda3/envs/torch/bin/||' | \
+  sed 's|--config configs/|--config |;s|\.yml.*||' | \
+  cut -c1-130 | sed 's/^/  /'
 
 echo
 echo "=========== 各 cell 训练进度（末行含当轮耗时）==========="
