@@ -36,8 +36,9 @@ def _sort_key(run_name):
 def load_training():
     out = []
     for path in glob.glob(os.path.join(RESULTS_DIR, "*.json")):
-        if os.path.basename(path).startswith("fid_"):
-            continue
+        base = os.path.basename(path)
+        if base.startswith("fid_") or base.startswith("systems_"):
+            continue  # FID sweeps and systems benchmarks have their own tables
         with open(path, encoding="utf-8") as f:
             out.append(json.load(f))
     return sorted(out, key=lambda d: _sort_key(d.get("run_name", "")))

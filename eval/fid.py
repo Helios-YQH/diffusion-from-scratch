@@ -197,6 +197,18 @@ def load_reference_images(path):
     if path.endswith(".pkl.gz"):
         from train import load_mnist
         return load_mnist()          # [N, 1, 28, 28] float in [-1, 1]
+    if not os.path.exists(path):
+        # The CelebA training tensor is normally produced by a training run.
+        # Build it on demand so evaluation does not depend on one having run.
+        import re
+
+        from train import extract_celeba, preprocess_celeba
+        m = re.search(r"celeba_(\d+)_uint8\.pt$", path)
+        size = int(m.group(1)) if m else 64
+        print(f"{path} not found — building it (extract + resize, "
+              f"one-time, ~20 min) ...", flush=True)
+        extract_celeba()
+        preprocess_celeba(image_size=size)
     return torch.load(path, weights_only=True, mmap=True)
 
 
@@ -430,9 +442,13 @@ def main():
             seed=args.seed + 1000 * rank, feat_fn=feat_fn)
 
         if world_size > 1:
-            gathered = [torch.zeros_like(feats) for _ in range(world_size)]
-            dist.all_gather(gathered, feats)
-            feats = torch.cat(gathered)
+            # NCCL only talks CUDA tensors, and the features are computed on CPU
+            # (deliberately, so a 50k-sample sweep never has to hold activations
+            # on the GPU). Move them over for the collective, then back.
+            feats_dev = feats.to(device, non_blocking=True)
+            gathered = [torch.empty_like(feats_dev) for _ in range(world_size)]
+            dist.all_gather(gathered, feats_dev)
+            feats = torch.cat([g.cpu() for g in gathered])
             t = torch.tensor([sample_seconds], device=device)
             dist.all_reduce(t, op=dist.ReduceOp.MAX)
             sample_seconds = float(t.item())
