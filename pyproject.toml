@@ -1,0 +1,17 @@
+[project]
+name = "diffusion-from-scratch"
+version = "0.1.0"
+description = "DDPM -> DiT -> Rectified Flow, from scratch: a 2x2 controlled study plus ML-systems analysis"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "matplotlib",
+    "pillow",
+    "tqdm",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+log = ["wandb>=0.17"]
+dev = ["pytest>=8"]
