@@ -263,6 +263,21 @@ def _git_commit():
         return "unknown"
 
 
+def _init_wandb(args, run_name, arch_cfg, is_main):
+    """Optional Weights & Biases logging. Returns (wandb_module, run)."""
+    if not getattr(args, "wandb", False) or not is_main:
+        return None, None
+    try:
+        import wandb
+    except ImportError:
+        print("  [warn] --wandb passed but wandb is not installed "
+              "(install with `uv sync --extra log`); logging disabled.")
+        return None, None
+    run = wandb.init(project=getattr(args, "wandb_project", "diffusion-from-scratch"),
+                     name=run_name, config={**vars(args), "arch": arch_cfg})
+    return wandb, run
+
+
 # ── Main training entry point ─────────────────────────────────────────
 
 def train(args):
@@ -388,6 +403,8 @@ def train(args):
     if is_main:
         print(f"Run: {run_name}  backbone={args.backbone}  "
               f"objective={args.objective}  params={n_params / 1e6:.1f}M")
+
+    wandb, wb = _init_wandb(args, run_name, arch_cfg, is_main)
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     if is_main:
@@ -532,8 +549,18 @@ def train(args):
             if epoch % sample_interval == 0 or epoch == args.epochs:
                 with ema.applied_to(model_for_save):
                     samples = diffusion.sample(16)
-                save_sample_grid(
-                    samples, os.path.join("samples", f"{run_name}_epoch{epoch}.png"))
+                grid_path = os.path.join("samples", f"{run_name}_epoch{epoch}.png")
+                save_sample_grid(samples, grid_path)
+                if wb:
+                    wb.log({"samples": wandb.Image(grid_path)}, step=global_step)
+
+            if wb:
+                wb.log({"train/loss": avg_loss,
+                        "train/grad_norm": avg_gnorm,
+                        "train/lr": scheduler.get_last_lr()[0],
+                        "train/epoch_time_s": epoch_time,
+                        "train/throughput_img_s": throughput,
+                        "train/epoch": epoch}, step=global_step)
 
     # ── Cost accounting summary ────────────────────────────────────
     if is_main:
@@ -569,6 +596,10 @@ def train(args):
         with open(out_path, "w") as f:
             json.dump(summary, f, indent=2, default=str)
         print(f"Results written: {out_path}")
+
+        if wb:
+            wb.summary.update(summary)
+            wb.finish()
 
     if is_distributed:
         dist.destroy_process_group()

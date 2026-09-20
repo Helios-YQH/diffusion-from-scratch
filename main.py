@@ -115,6 +115,9 @@ def build_parser(config_path):
     parser.add_argument("--snapshot-interval", type=int, default=0,
                         help="Save EMA-only weight snapshots every N epochs "
                              "(0 = off; for FID-vs-steps curves)")
+    parser.add_argument("--wandb", action="store_true", default=False,
+                        help="Log to Weights & Biases (needs `uv sync --extra log`)")
+    parser.add_argument("--wandb-project", type=str, default="diffusion-from-scratch")
     parser.add_argument("--timesteps", type=int, default=1000)
     parser.add_argument("--image-size", type=int, default=None,
                         help="Image size (default: 28 for mnist, 64 for celeba)")
