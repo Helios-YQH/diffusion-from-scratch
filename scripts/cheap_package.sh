@@ -38,6 +38,25 @@ if [ "${WANDB:-0}" = "1" ]; then WANDB_FLAG="--wandb"; fi
 # have <path>: true when the stage that writes <path> is already done
 have() { [ "${FORCE:-0}" = "1" ] && return 1; [ -f "$1" ]; }
 
+# fid_has <json> <sampler> <nfe>: true when that exact sweep point is already
+# recorded. FID JSONs are written incrementally, so file existence alone would
+# mistake a half-finished sweep for a complete one.
+fid_has() {
+  [ "${FORCE:-0}" = "1" ] && return 1
+  [ -f "$1" ] || return 1
+  "$PY" - "$@" <<'PYEOF'
+import json, sys
+path, sampler, nfe = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    with open(path, encoding="utf-8") as f:
+        runs = json.load(f).get("runs", [])
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(r.get("sampler") == sampler and r.get("nfe") == nfe
+                  for r in runs) else 1)
+PYEOF
+}
+
 if [ ! -f main.py ]; then echo "run me from the repo root"; exit 1; fi
 mkdir -p logs results samples checkpoints
 LOG="logs/cheap_package_$(date +%Y%m%d_%H%M%S).log"
@@ -72,22 +91,32 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
   echo "=== 2/5  MNIST evaluation ===" | tee -a "$LOG"
   $PY eval/fid.py --build-ref --feature-net mnist 2>&1 | tee -a "$LOG"
   for r in mnist_unet_eps mnist_dit_eps; do
-    if have "results/fid_$r.json"; then
-      echo "  fid_$r already done — skipping" | tee -a "$LOG"; continue
-    fi
-    if [ "$NGPU" -gt 1 ]; then
+    J="results/fid_$r.json"
+    if fid_has "$J" ancestral 1000; then
+      echo "  fid_$r ancestral already done — skipping" | tee -a "$LOG"
+    elif [ "$NGPU" -gt 1 ]; then
       $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
           --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
     else
       $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
     fi
-    $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ddim --nfe 10 20 50 2>&1 | tee -a "$LOG"
+    for nfe in 10 20 50; do
+      if fid_has "$J" ddim "$nfe"; then
+        echo "  fid_$r DDIM nfe=$nfe already done — skipping" | tee -a "$LOG"
+      else
+        $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ddim --nfe "$nfe" 2>&1 | tee -a "$LOG"
+      fi
+    done
   done
   for r in mnist_unet_rf mnist_dit_rf; do
-    if have "results/fid_$r.json"; then
-      echo "  fid_$r already done — skipping" | tee -a "$LOG"; continue
-    fi
-    $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler euler --nfe 4 8 16 32 64 2>&1 | tee -a "$LOG"
+    J="results/fid_$r.json"
+    for nfe in 4 8 16 32 64; do
+      if fid_has "$J" euler "$nfe"; then
+        echo "  fid_$r euler nfe=$nfe already done — skipping" | tee -a "$LOG"
+      else
+        $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler euler --nfe "$nfe" 2>&1 | tee -a "$LOG"
+      fi
+    done
   done
 fi
 
@@ -96,19 +125,26 @@ if [ "${SKIP_CELEBA:-0}" != "1" ]; then
   echo "=== 3/5  CelebA sampler study (no training) ===" | tee -a "$LOG"
   if [ ! -f checkpoints/ddpm_celeba_best.pt ]; then
     echo "  [skip] checkpoints/ddpm_celeba_best.pt is missing" | tee -a "$LOG"
-  elif have "results/fid_ddpm_celeba.json"; then
-    echo "  fid_ddpm_celeba.json already exists — skipping (FORCE=1 to redo)" | tee -a "$LOG"
   else
     $PY eval/fid.py --build-ref --feature-net inception 2>&1 | tee -a "$LOG"
+    J=results/fid_ddpm_celeba.json
     for nfe in 10 20 50; do
-      $PY eval/fid.py --run-name ddpm_celeba --sampler ddim --nfe "$nfe" 2>&1 | tee -a "$LOG"
+      if fid_has "$J" ddim "$nfe"; then
+        echo "  DDIM nfe=$nfe already done — skipping" | tee -a "$LOG"
+      else
+        $PY eval/fid.py --run-name ddpm_celeba --sampler ddim --nfe "$nfe" 2>&1 | tee -a "$LOG"
+      fi
     done
-    echo "--- the expensive point: 1000 NFE x $N samples (~1 h on 4 GPUs, ~4 h on one)" | tee -a "$LOG"
-    if [ "$NGPU" -gt 1 ]; then
-      $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
-          --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+    if fid_has "$J" ancestral 1000; then
+      echo "  ancestral NFE=1000 already done — skipping" | tee -a "$LOG"
     else
-      $PY eval/fid.py --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+      echo "--- the expensive point: 1000 NFE x $N samples (~4 h; see the runbook)" | tee -a "$LOG"
+      if [ "$NGPU" -gt 1 ]; then
+        $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
+            --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+      else
+        $PY eval/fid.py --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+      fi
     fi
   fi
 fi
