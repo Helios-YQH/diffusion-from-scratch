@@ -66,3 +66,44 @@ class DDPM:
         if return_all:
             return x, steps
         return x
+
+    @torch.no_grad()
+    def sample_ddim(self, n, num_steps=50, eta=0.0, return_all=False):
+        """DDIM sampling with the same trained eps model.
+
+        num_steps is the number of function evaluations (NFE); eta=0 gives
+        deterministic sampling. The last transition goes to alpha_bar = 1.
+        """
+        self.model.eval()
+        x = torch.randn(n, self.img_channels, self.img_size, self.img_size,
+                        device=self.device)
+        seq = torch.linspace(self.T - 1, 0, num_steps).round().long().tolist()
+        steps = [x.clone()] if return_all else None
+        capture_every = max(1, num_steps // 10)
+
+        for i, t_cur in enumerate(seq):
+            t_prev = seq[i + 1] if i + 1 < len(seq) else -1
+            t_batch = torch.full((n,), t_cur, device=self.device, dtype=torch.long)
+            eps = self.model(x, t_batch)
+
+            ab_t = self.alpha_bars[t_cur]
+            if t_prev >= 0:
+                ab_prev = self.alpha_bars[t_prev]
+            else:
+                ab_prev = torch.ones((), device=self.device)
+
+            x0 = ((x - (1.0 - ab_t).sqrt() * eps) / ab_t.sqrt()).clamp(-1.0, 1.0)
+            sigma = eta * ((1.0 - ab_prev) / (1.0 - ab_t)).sqrt() \
+                * (1.0 - ab_t / ab_prev).sqrt()
+            x = ab_prev.sqrt() * x0 + (1.0 - ab_prev - sigma ** 2).sqrt() * eps
+            if eta > 0:
+                x = x + sigma * torch.randn_like(x)
+
+            if return_all and (i + 1) % capture_every == 0:
+                steps.append(x.clone())
+
+        self.model.train()
+        x = torch.clamp(x, -1.0, 1.0)
+        if return_all:
+            return x, steps
+        return x

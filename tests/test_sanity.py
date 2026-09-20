@@ -181,6 +181,23 @@ def test_ema_applied_to_restores():
     assert torch.allclose(lin.weight, raw)
 
 
+# ── Data pipeline ─────────────────────────────────────────────────────
+
+def test_uint8_to_model_input():
+    """The uint8 cache must map back to exactly the float [-1, 1] range."""
+    from train import to_model_input
+
+    u8 = torch.tensor([[[[0]], [[128]], [[255]]]], dtype=torch.uint8)
+    x = to_model_input(u8, "cpu")
+    assert x.dtype == torch.float32
+    assert torch.allclose(x.flatten(),
+                          torch.tensor([-1.0, 128 / 127.5 - 1.0, 1.0]),
+                          atol=1e-6)
+
+    f = torch.randn(2, 3, 4, 4)
+    assert torch.equal(to_model_input(f, "cpu"), f)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
