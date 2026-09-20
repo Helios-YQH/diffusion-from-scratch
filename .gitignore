@@ -3,3 +3,5 @@ __pycache__/
 checkpoints/
 samples/
 data/
+wandb/
+TODO.md
