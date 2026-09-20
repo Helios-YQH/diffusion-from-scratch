@@ -18,22 +18,29 @@
 #     SKIP_MNIST=1 | SKIP_CELEBA=1 | SKIP_SYSTEMS=1
 #     FORCE=1        redo stages whose outputs already exist
 #
-# The script is restart-safe: a stage (or a single MNIST cell) whose results
-# JSON already exists is skipped, so re-running after a crash resumes instead
-# of starting over. Completed stages are detected from results/*.json.
+# Restart-safe: a stage (or a single MNIST cell, or a single FID sweep point)
+# whose result is already recorded is skipped, so re-running after a crash
+# resumes instead of starting over. A stage that fails is logged and the run
+# continues; the failure list is printed at the end. Completed work is
+# detected from results/*.json.
 # ---------------------------------------------------------------------------
-set -euo pipefail
+set -uo pipefail
 
 GPUS=${GPUS:-0}
 PY=${PY:-python3}
 TORCHRUN=${TORCHRUN:-torchrun}
 N=${N:-10000}
-NGPU=$(awk -F, '{print NF}' <<< "$GPUS")
+NGPU=$(awk -F',' '{print NF}' <<< "$GPUS")
 export CUDA_VISIBLE_DEVICES="$GPUS"
 export NCCL_P2P_DISABLE=1
 
 WANDB_FLAG=""
 if [ "${WANDB:-0}" = "1" ]; then WANDB_FLAG="--wandb"; fi
+
+if [ ! -f main.py ]; then echo "run me from the repo root"; exit 1; fi
+mkdir -p logs results samples checkpoints
+LOG="logs/cheap_package_$(date +%Y%m%d_%H%M%S).log"
+FAILED=()
 
 # have <path>: true when the stage that writes <path> is already done
 have() { [ "${FORCE:-0}" = "1" ] && return 1; [ -f "$1" ]; }
@@ -57,9 +64,19 @@ sys.exit(0 if any(r.get("sampler") == sampler and r.get("nfe") == nfe
 PYEOF
 }
 
-if [ ! -f main.py ]; then echo "run me from the repo root"; exit 1; fi
-mkdir -p logs results samples checkpoints
-LOG="logs/cheap_package_$(date +%Y%m%d_%H%M%S).log"
+# run <label> <cmd...>: tee output into the log, record a failure but never
+# abort the package — an unattended run should finish whatever it can.
+run() {
+  local label="$1"; shift
+  echo ">>> $label" | tee -a "$LOG"
+  "$@" 2>&1 | tee -a "$LOG"
+  local st=${PIPESTATUS[0]}
+  if [ "$st" -ne 0 ]; then
+    echo "!!! FAILED (exit $st): $label" | tee -a "$LOG"
+    FAILED+=("$label")
+  fi
+  return 0
+}
 
 echo "=== environment ===" | tee -a "$LOG"
 $PY -c "import sys, torch; print('python', sys.version.split()[0], '| torch', torch.__version__, '| cuda', torch.cuda.is_available(), '| visible gpus', torch.cuda.device_count())" | tee -a "$LOG"
@@ -83,28 +100,36 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
   done
   wait || true
   for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
-    echo "--- $c finished:" | tee -a "$LOG"
-    tail -3 "logs/train_$c.log" 2>/dev/null | tee -a "$LOG"
+    if [ -f "results/$c.json" ]; then
+      echo "--- $c OK:" | tee -a "$LOG"
+      tail -2 "logs/train_$c.log" 2>/dev/null | tee -a "$LOG"
+    else
+      echo "!!! FAILED: training $c (no results/$c.json)" | tee -a "$LOG"
+      FAILED+=("train $c")
+      tail -5 "logs/train_$c.log" 2>/dev/null | tee -a "$LOG"
+    fi
   done
 
   echo | tee -a "$LOG"
   echo "=== 2/5  MNIST evaluation ===" | tee -a "$LOG"
-  $PY eval/fid.py --build-ref --feature-net mnist 2>&1 | tee -a "$LOG"
+  run "mnist reference stats" $PY eval/fid.py --build-ref --feature-net mnist
   for r in mnist_unet_eps mnist_dit_eps; do
     J="results/fid_$r.json"
     if fid_has "$J" ancestral 1000; then
       echo "  fid_$r ancestral already done — skipping" | tee -a "$LOG"
     elif [ "$NGPU" -gt 1 ]; then
-      $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
-          --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+      run "fid $r ancestral" $TORCHRUN --standalone --nproc_per_node="$NGPU" \
+          eval/fid.py --run-name "$r" --feature-net mnist --sampler ancestral --num-samples "$N"
     else
-      $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+      run "fid $r ancestral" $PY eval/fid.py \
+          --run-name "$r" --feature-net mnist --sampler ancestral --num-samples "$N"
     fi
     for nfe in 10 20 50; do
       if fid_has "$J" ddim "$nfe"; then
         echo "  fid_$r DDIM nfe=$nfe already done — skipping" | tee -a "$LOG"
       else
-        $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler ddim --nfe "$nfe" 2>&1 | tee -a "$LOG"
+        run "fid $r ddim nfe=$nfe" $PY eval/fid.py \
+            --run-name "$r" --feature-net mnist --sampler ddim --nfe "$nfe"
       fi
     done
   done
@@ -114,7 +139,8 @@ if [ "${SKIP_MNIST:-0}" != "1" ]; then
       if fid_has "$J" euler "$nfe"; then
         echo "  fid_$r euler nfe=$nfe already done — skipping" | tee -a "$LOG"
       else
-        $PY eval/fid.py --run-name "$r" --feature-net mnist --sampler euler --nfe "$nfe" 2>&1 | tee -a "$LOG"
+        run "fid $r euler nfe=$nfe" $PY eval/fid.py \
+            --run-name "$r" --feature-net mnist --sampler euler --nfe "$nfe"
       fi
     done
   done
@@ -126,13 +152,14 @@ if [ "${SKIP_CELEBA:-0}" != "1" ]; then
   if [ ! -f checkpoints/ddpm_celeba_best.pt ]; then
     echo "  [skip] checkpoints/ddpm_celeba_best.pt is missing" | tee -a "$LOG"
   else
-    $PY eval/fid.py --build-ref --feature-net inception 2>&1 | tee -a "$LOG"
+    run "celeba reference stats" $PY eval/fid.py --build-ref --feature-net inception
     J=results/fid_ddpm_celeba.json
     for nfe in 10 20 50; do
       if fid_has "$J" ddim "$nfe"; then
         echo "  DDIM nfe=$nfe already done — skipping" | tee -a "$LOG"
       else
-        $PY eval/fid.py --run-name ddpm_celeba --sampler ddim --nfe "$nfe" 2>&1 | tee -a "$LOG"
+        run "celeba ddim nfe=$nfe" $PY eval/fid.py \
+            --run-name ddpm_celeba --sampler ddim --nfe "$nfe"
       fi
     done
     if fid_has "$J" ancestral 1000; then
@@ -140,10 +167,11 @@ if [ "${SKIP_CELEBA:-0}" != "1" ]; then
     else
       echo "--- the expensive point: 1000 NFE x $N samples (~4 h; see the runbook)" | tee -a "$LOG"
       if [ "$NGPU" -gt 1 ]; then
-        $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/fid.py \
-            --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+        run "celeba ancestral 1000" $TORCHRUN --standalone --nproc_per_node="$NGPU" \
+            eval/fid.py --run-name ddpm_celeba --sampler ancestral --num-samples "$N"
       else
-        $PY eval/fid.py --run-name ddpm_celeba --sampler ancestral --n "$N" 2>&1 | tee -a "$LOG"
+        run "celeba ancestral 1000" $PY eval/fid.py \
+            --run-name ddpm_celeba --sampler ancestral --num-samples "$N"
       fi
     fi
   fi
@@ -155,21 +183,27 @@ if [ "${SKIP_SYSTEMS:-0}" != "1" ]; then
   if have "results/systems_celeba_dit_rf.json"; then
     echo "  systems_celeba_dit_rf.json already exists — skipping (FORCE=1 to redo)" | tee -a "$LOG"
   else
-    $PY eval/systems.py --config configs/celeba_dit_rf.yml \
-        --settings fp32 bf16 compile bf16+compile --profile 2>&1 | tee -a "$LOG"
+    run "systems settings + profile" $PY eval/systems.py \
+        --config configs/celeba_dit_rf.yml --settings fp32 bf16 compile bf16+compile --profile
     if [ "$NGPU" -gt 1 ]; then
-      $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/systems.py \
-          --config configs/celeba_dit_rf.yml --ddp --settings fp32 2>&1 | tee -a "$LOG"
+      run "systems ddp" $TORCHRUN --standalone --nproc_per_node="$NGPU" eval/systems.py \
+          --config configs/celeba_dit_rf.yml --ddp --settings fp32
     fi
   fi
 fi
 
 echo | tee -a "$LOG"
 echo "=== 5/5  figures + tables ===" | tee -a "$LOG"
-$PY reports/make_figures.py 2>&1 | tee -a "$LOG"
-$PY eval/make_table.py --out reports/results.md 2>&1 | tee -a "$LOG"
+run "figures" $PY reports/make_figures.py
+run "summary tables" $PY eval/make_table.py --out reports/results.md
 
 echo | tee -a "$LOG"
-echo "done. next:" | tee -a "$LOG"
-echo "  cd reports && latexmk -pdf tech_report.tex      # figures now fill in" | tee -a "$LOG"
-echo "  full log: $LOG" | tee -a "$LOG"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  echo "=== finished WITH FAILURES ===" | tee -a "$LOG"
+  for f in "${FAILED[@]}"; do echo "  - $f" | tee -a "$LOG"; done
+  echo "re-run this script to retry only the missing pieces" | tee -a "$LOG"
+else
+  echo "=== all stages completed ===" | tee -a "$LOG"
+fi
+echo "next:  cd reports && latexmk -pdf tech_report.tex" | tee -a "$LOG"
+echo "full log: $LOG" | tee -a "$LOG"

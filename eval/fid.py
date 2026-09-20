@@ -16,12 +16,12 @@ Usage (single GPU or torchrun):
   python eval/fid.py --build-ref --feature-net inception
 
   # 2) evaluate one configuration
-  python eval/fid.py --run-name celeba_dit_rf --n 10000 --sampler euler --nfe 16
-  python eval/fid.py --run-name mnist_unet_rf  --n 10000 --sampler euler --nfe 16 \
+  python eval/fid.py --run-name celeba_dit_rf --num-samples 10000 --sampler euler --nfe 16
+  python eval/fid.py --run-name mnist_unet_rf   --num-samples 10000 --sampler euler --nfe 16 \
       --feature-net mnist
 
   # 3) NFE sweep
-  python eval/fid.py --run-name celeba_unet_eps --n 10000 --sampler ddim \
+  python eval/fid.py --run-name celeba_unet_eps --num-samples 10000 --sampler ddim \
       --nfe 10 20 50
 """
 
@@ -335,7 +335,10 @@ def parse_args():
                    default="euler")
     p.add_argument("--nfe", type=int, nargs="+", default=[32],
                    help="ODE/DDIM steps to sweep (ancestral ignores this)")
-    p.add_argument("--n", type=int, default=10000, help="Total samples (Tier 1 = 10k)")
+    p.add_argument("--num-samples", type=int, default=10000, dest="n",
+                   help="Total samples (Tier 1 = 10k). Deliberately not called "
+                        "--n: torchrun's own parser rejects it as an ambiguous "
+                        "prefix of --nnodes/--nproc-per-node.")
     p.add_argument("--batch-size", type=int, default=64, help="Sampling batch size")
     p.add_argument("--feat-batch", type=int, default=64)
     p.add_argument("--seed", type=int, default=42)

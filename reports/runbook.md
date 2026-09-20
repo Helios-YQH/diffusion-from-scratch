@@ -103,17 +103,22 @@ tail -f logs/dit_rf.log
 
 ### How long a cell takes
 
-Derived from the measured FLOPs (training ≈ 3× forward), 253.7 steps/epoch, 300 epochs:
+Measured on the 6×A6000 box, **training in fp32** (the loop has no autocast):
+a MNIST cell is ~65–80 min, and the CelebA cells extrapolate from their measured FLOPs
+(training ≈ 3× forward; the step runs at ≈49% of the fp32 peak, which is what the
+MNIST run demonstrated):
 
-| Cell | Forward GFLOPs/sample | Train FLOPs/step @800 | @20% MFU, 4×A6000 | @35% MFU |
-|---|---|---|---|---|
-| DiT (B, D) | 43.6 | 104.6 TFLOPs | ~18 h | ~10 h |
-| UNet (A, C) | 67.8 | 162.8 TFLOPs | ~28 h | ~16 h |
-| **all four** | | | **~3.8 days** | **~2.2 days** |
+| Cell | Forward GFLOPs/sample | Train FLOPs/step @800 | ≈ wall clock, 4 GPUs, fp32 |
+|---|---|---|---|
+| DiT (B, D) | 43.6 | 104.6 TFLOPs | ~36 h |
+| UNet (A, C) | 67.8 | 162.8 TFLOPs | ~55 h |
+| **all four** | | | **~4 days** |
 
-Empirical anchor: the previous 300-epoch UNet run on this shared box spanned ~3 days of
-wall-clock. Treat ~1–2 days (DiT) and ~1.5–3 days (UNet) per cell as the planning range, and
-let the first cell calibrate — the printed `s/step` and MFU make the extrapolation explicit.
+**Mixed precision is the lever**: `eval/systems.py` measures bf16 against fp32 on this
+hardware, and that ratio is the number to apply to this table before committing to the
+CelebA 2×2. The one data point we have is that the MNIST cells hit ≈49% of fp32 peak, which
+is a healthy fp32 efficiency — the time is going into a quarter-width compute pipe, not into
+overhead.
 
 ## 6. Evaluation
 
@@ -124,13 +129,13 @@ PY="uv run python"        # or an existing env's interpreter
 $PY eval/fid.py --build-ref
 
 # Tier 1 (10k samples) — sweeps while a run is still going
-$PY eval/fid.py --run-name celeba_dit_rf  --n 10000 --sampler euler  --nfe 4 8 16 32 64 128
-$PY eval/fid.py --run-name celeba_dit_eps --n 10000 --sampler ddim   --nfe 10 20 50
-$PY eval/fid.py --run-name celeba_unet_eps --n 10000 --sampler ancestral
+$PY eval/fid.py --run-name celeba_dit_rf  --num-samples 10000 --sampler euler  --nfe 4 8 16 32 64 128
+$PY eval/fid.py --run-name celeba_dit_eps --num-samples 10000 --sampler ddim   --nfe 10 20 50
+$PY eval/fid.py --run-name celeba_unet_eps --num-samples 10000 --sampler ancestral
 
 # Tier 2 (50k, sharded over GPUs) — final numbers only
 CUDA_VISIBLE_DEVICES=0,1,2,3 uv run torchrun --standalone --nproc_per_node=4 \
-  eval/fid.py --run-name celeba_dit_rf --n 50000 --sampler euler --nfe 16
+  eval/fid.py --run-name celeba_dit_rf --num-samples 50000 --sampler euler --nfe 16
 ```
 
 Each call appends to `results/fid_<run_name>.json` (re-running the same
@@ -143,47 +148,68 @@ uv run python eval/cost.py --config configs/celeba_dit_rf.yml \
   --step-time 1.23 --batch-size 800 --gpu A6000
 ```
 
-## 6b. The cheap package (recommended scope, ~6–8 GPU·h)
+## 6b. The cheap package (recommended scope)
 
-Everything the report needs except the CelebA 2×2 trainings. Run in this order.
+One script runs everything the report needs except the CelebA 2×2 trainings — the four MNIST
+cells in parallel (one per GPU), both FID sweeps, the systems measurements, then the figures
+and tables:
+
+```bash
+GPUS=0,1,2,3 PY=<interpreter> TORCHRUN=<torchrun> \
+  nohup bash scripts/cheap_package.sh </dev/null >/dev/null 2>&1 &
+tail -f logs/cheap_package_*.log          # progress; scripts/status.sh summarises it
+```
+
+Prerequisites: the data (§2) and, for the CelebA half, `checkpoints/ddpm_celeba_best.pt`
+(not in git — copy it over). Wall clock ≈ 5.5–6 h on 4 GPUs, dominated by the single 1000-NFE
+CelebA point (≈4 h in fp32).
+
+The script is **restart-safe**: completed stages, individual MNIST cells and individual FID
+sweep points are detected from `results/*.json` and skipped, so a re-run after a crash
+resumes rather than starting over (`FORCE=1` redoes everything). A stage that fails is logged
+and the run continues; failures are listed at the end.
+
+```bash
+# progress at any time (from your laptop):
+ssh -p 30153 houyi@frp-egg.com 'bash /mnt/14T/houyi/dit-sys/scripts/status.sh'
+```
+
+The individual commands, if you want to run them by hand:
 
 ```bash
 PY="uv run python"        # or an existing env's interpreter
 
-# 1) MNIST 2×2 — all four cells, ~5 min each on one GPU
+# 1) MNIST 2x2 — four cells, ~65-80 min each; give each cell its own GPU
 for c in mnist_unet_eps mnist_dit_eps mnist_unet_rf mnist_dit_rf; do
-  $PY main.py train --config configs/$c.yml
-done
+  CUDA_VISIBLE_DEVICES=$g $PY main.py train --config configs/$c.yml &
+done; wait
 
 # 2) MNIST evaluation (reference stats + sampler sweep per cell)
 $PY eval/fid.py --build-ref --feature-net mnist
-for r in mnist_unet_eps mnist_dit_eps; do
-  $PY eval/fid.py --run-name $r --feature-net mnist --sampler ancestral --n 10000
-  $PY eval/fid.py --run-name $r --feature-net mnist --sampler ddim --nfe 10 20 50
-done
-for r in mnist_unet_rf mnist_dit_rf; do
-  $PY eval/fid.py --run-name $r --feature-net mnist --sampler euler --nfe 4 8 16 32 64
-done
+$PY eval/fid.py --run-name mnist_unet_eps --feature-net mnist --sampler ancestral --num-samples 10000
+$PY eval/fid.py --run-name mnist_unet_eps --feature-net mnist --sampler ddim --nfe 10 20 50
+# ... likewise for the other three cells
 
 # 3) CelebA sampler study on the EXISTING DDPM checkpoint — no training needed.
-#    Requires the old checkpoint on the box (it is not in git):
-#      scp checkpoints/ddpm_celeba_best.pt <host>:dit-sys/checkpoints/
-#    and the data (§2). The 1000-NFE point is the expensive one: ~1 h on 4 GPUs,
-#    ~4 h on one. Every DDIM point is minutes.
+#    The 1000-NFE point is the expensive one (~4 h on 4 GPUs in fp32); DDIM is minutes.
 $PY eval/fid.py --build-ref --feature-net inception
-$PY eval/fid.py --run-name ddpm_celeba --sampler ancestral --n 10000
 $PY eval/fid.py --run-name ddpm_celeba --sampler ddim --nfe 10 20 50
+$TORCHRUN --standalone --nproc_per_node=4 \
+  eval/fid.py --run-name ddpm_celeba --sampler ancestral --num-samples 10000
 
 # 4) Systems measurements (minutes, no training)
 $PY eval/systems.py --config configs/celeba_dit_rf.yml \
     --settings fp32 bf16 compile bf16+compile --profile
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1 $TORCHRUN --standalone --nproc_per_node=2 \
     eval/systems.py --config configs/celeba_dit_rf.yml --ddp --settings fp32
 
 # 5) Figures and tables for the report
 $PY reports/make_figures.py
 $PY eval/make_table.py --out reports/results.md
 ```
+
+> `eval/fid.py` deliberately has no `--n` flag: torchrun's own argument parser rejects
+> `--n` as an ambiguous prefix of `--nnodes`/`--nproc-per-node`. Use `--num-samples`.
 
 The four CelebA cells (Section 5) are the expensive half; add them when GPUs allow and the
 same figures/tables absorb them automatically.
