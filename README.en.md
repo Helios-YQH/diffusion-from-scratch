@@ -4,9 +4,10 @@ A from-scratch (no `diffusers`) diffusion implementation: a **controlled study**
 backbones / training objectives — UNet + DDPM, DiT, and Rectified Flow — with FID,
 NFE-efficiency curves, and modern ML-systems analysis.
 
-Status: the 2×2 controlled study (UNet/DiT × DDPM/rectified flow) has its code and protocol
-frozen and is training on a 5-GPU server; the DDPM baseline is complete on MNIST 28×28
-and CelebA 64×64.
+Status: the 2×2 controlled study (UNet/DiT × DDPM/rectified flow) has its code, evaluation
+and protocol ready — training runs as soon as GPUs are free; the DDPM baseline is complete on
+MNIST 28×28 and CelebA 64×64. See [reports/technical_report.md](reports/technical_report.md)
+(results pending) and [reports/runbook.md](reports/runbook.md).
 
 | MNIST 28×28 (UNet 12M, 170 epochs) | CelebA 64×64 (UNet 174M, 300 epochs) |
 |---|---|
@@ -19,10 +20,11 @@ and CelebA 64×64.
   Rectified Flow (linear-interpolation path + Euler ODE sampling)
 - **Training systems**: torchrun DDP (up to 5 GPUs), YAML configs, checkpoint resume, EMA,
   per-epoch snapshots, cost accounting
-- **Evaluation**: FID (reference stats consistent with the training preprocessing),
-  FID-vs-NFE curves (planned)
-- **ML systems**: params / FLOPs / step time / throughput / MFU, torch.compile,
-  Triton fused AdaLN, CUDA-Graph sampling (planned)
+- **Evaluation**: FID with reference stats built from the training tensor itself (no
+  preprocessing drift), plus DDIM/Euler NFE sweeps
+- **Cost accounting**: params / measured FLOPs / step time / throughput / peak memory / MFU
+  written to `results/*.json` on every run; `eval/make_table.py` renders the report tables
+- **ML systems (in progress)**: torch.compile, Triton fused adaLN, CUDA-Graph sampling
 
 ## Setup
 
@@ -68,8 +70,12 @@ uv run python demo.py --dataset celeba
 │   ├── ddpm.py         # DDPM: forward noising / eps loss / ancestral sampling
 │   └── flow.py         # Rectified flow: linear path / v loss / Euler sampling
 ├── configs/            # YAML configs for the four cells + MNIST
-├── tests/              # Invariant and shape tests
-├── reports/            # Experiment protocol and technical report (results pending)
+├── eval/               # Evaluation and measurement
+│   ├── fid.py          # FID (self-built reference stats) + NFE sweeps
+│   ├── cost.py         # measured FLOPs / params / MFU
+│   └── make_table.py   # results/*.json -> markdown tables
+├── tests/              # Invariant and shape tests (CPU-runnable)
+├── reports/            # Technical report and runbook
 ├── figures/            # Result figures
 ├── train.py            # Training loop, data pipeline, EMA, checkpoints, cost accounting
 ├── main.py             # CLI entry point (train / sample)

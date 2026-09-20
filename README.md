@@ -3,8 +3,10 @@
 从零实现（不依赖 diffusers）的扩散模型项目：用统一的**受控实验**对比 UNet/DDPM、DiT 与
 Rectified Flow 三种骨干与训练目标，配套 FID、NFE 采样效率与现代 ML systems 分析。
 
-当前状态：2×2 受控实验（UNet/DiT × DDPM/rectified flow）的代码与协议已冻结，
-服务器训练进行中；DDPM 基线已在 MNIST 28×28 与 CelebA 64×64 上完成 5-GPU DDP 训练。
+当前状态：2×2 受控实验（UNet/DiT × DDPM/rectified flow）的代码、评估与协议已就绪，
+训练待 GPU 空闲后进行；DDPM 基线已在 MNIST 28×28 与 CelebA 64×64 上完成 5-GPU DDP 训练。
+实验计划见 [reports/technical_report.md](reports/technical_report.md)（结果待填），
+执行步骤见 [reports/runbook.md](reports/runbook.md)。
 
 | MNIST 28×28（UNet 12M，170 epochs） | CelebA 64×64（UNet 174M，300 epochs） |
 |---|---|
@@ -15,9 +17,10 @@ Rectified Flow 三种骨干与训练目标，配套 FID、NFE 采样效率与现
 - **核心算法从零实现**：DDPM 前向/反向过程、UNet（正弦时间嵌入 / 残差块 / 中间层注意力）、
   DiT（adaLN-Zero，无类别条件）、Rectified Flow（线性插值路径 + Euler ODE 采样）
 - **训练系统**：torchrun DDP（最多 5 GPU）、YAML 配置、断点续训、EMA、按 epoch 快照、cost accounting
-- **评估**：FID（与训练预处理一致的 reference stats）、FID-vs-NFE 曲线（计划中）
-- **ML systems**：params / FLOPs / step time / throughput / MFU、torch.compile、
-  Triton fused AdaLN、CUDA Graph 采样（计划中）
+- **评估**：FID（reference stats 由训练张量自建，杜绝预处理不一致）、DDIM / Euler 的 NFE 扫描
+- **成本核算**：params / FLOPs（实测）/ step time / throughput / 显存 / MFU，每次训练自动写入
+  `results/*.json`；`eval/make_table.py` 直接生成报告用表格
+- **ML systems（进行中）**：torch.compile、Triton fused AdaLN、CUDA Graph 采样
 
 ## 环境
 
@@ -63,8 +66,12 @@ uv run python demo.py --dataset celeba
 │   ├── ddpm.py         # DDPM：前向加噪 / ε 损失 / 祖先采样
 │   └── flow.py         # Rectified flow：线性插值路径 / v 损失 / Euler 采样
 ├── configs/            # 四个实验单元 + MNIST 的 YAML 配置
-├── tests/              # 不变量与形状测试
-├── reports/            # 实验协议与技术报告（结果出来后补齐）
+├── eval/               # 评估与计量
+│   ├── fid.py          # FID（自建 reference stats）+ NFE 扫描
+│   ├── cost.py         # FLOPs（实测）/ 参数量 / MFU
+│   └── make_table.py   # results/*.json -> markdown 表
+├── tests/              # 不变量与形状测试（CPU 可跑）
+├── reports/            # 技术报告与运行手册
 ├── figures/            # 结果图
 ├── train.py            # 训练循环、数据管线、EMA、checkpoint、cost accounting
 ├── main.py             # CLI 入口（train / sample）

@@ -1,115 +1,180 @@
-# Runbook — 2×2 study on the GPU server
+# Runbook — running the 2×2 study
 
-## Server facts (measured 2026-09-20)
+From a fresh clone to FID numbers. Written to be **machine-agnostic**: the reference path is
+a [uv](https://docs.astral.sh/uv/) environment (portable, and it pins torch via `uv.lock`);
+an already-working conda/pip environment is a drop-in alternative.
 
-| | |
-|---|---|
-| SSH | `ssh -p 30153 houyi@frp-egg.com` (passwordless; the frp tunnel drops occasionally) |
-| Python | `/mnt/14T/houyi/miniconda3/envs/torch/bin/python` — Python 3.11, torch 2.13.0+cu126, 6 GPUs |
-| GPUs | 6 × RTX A6000 48GB, **shared with other users** |
-| Topology | GPU 0–3 = NUMA 0 (PIX, fast); 4–5 = NUMA 1; cross-group = SYS (**slow**) → keep DDP inside one group |
-| Disk | root 9.7 GB free, `/mnt/14T` 20 GB free; `/mnt/15_14T` has 1.5 TB but **not writable** |
-| uv | not installed — use the conda env directly (no `uv sync` needed) |
+## 0. What you need
 
-**Disk budget** (with the uint8 cache): data ≈ 1.4 GB zip + 1.6 GB extracted + 2.5 GB cache;
-checkpoints ≈ 1.0–1.4 GB per `best`, 0.5–0.7 GB per EMA snapshot, 2.1–2.8 GB per `latest`.
-All four cells together ≈ 22 GB → run cells one at a time; delete a finished cell's
-`latest`/snapshots if space runs short.
+- Linux box, ≥1 NVIDIA GPU (the models fit in 24GB; the protocol assumes 4–6 for DDP)
+- ~30GB free disk: data ~5.5GB (zip 1.4 + extracted 1.6 + uint8 cache 2.5) + checkpoints
+  ~22GB for all four cells (per cell: `best` 1.0–1.4GB, EMA snapshots 0.5–0.7GB each,
+  `latest` 2.1–2.8GB)
+- Python 3.10+ (uv can fetch one)
 
-## 0. One-time setup
+## 1. Environment
+
+### Default: uv
 
 ```bash
-# --- local machine ---
-scp -P 30153 data/celeba.zip houyi@frp-egg.com:~/dit-sys/data/
-scp -P 30153 data/mnist/mnist.pkl.gz houyi@frp-egg.com:~/dit-sys/data/mnist/
-
-# --- server ---
-cd ~ && git clone git@gitee.com:hy_ucas/dit-sys.git dit-sys && cd dit-sys
-PY=/mnt/14T/houyi/miniconda3/envs/torch/bin/python
-$PY tests/test_sanity.py          # CPU invariants, ~1 min
+git clone git@gitee.com:hy_ucas/dit-sys.git && cd dit-sys
+uv sync              # torch, numpy, matplotlib, pillow, tqdm, pyyaml
+uv sync --extra log  # + wandb
+uv run python tests/test_sanity.py     # 14 CPU invariants, ~1 min, no GPU needed
 ```
 
-## 1. Pre-flight — always do this first
+- `uv run <cmd>` runs inside `.venv`; `uv run torchrun ...` works too.
+- **CUDA mismatch?** `uv sync` pulls the default CUDA build from PyPI. If `nvidia-smi` shows
+  an older driver, override: `uv pip install torch --index-url https://download.pytorch.org/whl/cu121`
+  (pick the `cuXXX` matching the driver), then re-run the tests.
+- **No uv on the box / no network?** Any env with torch ≥2.0 + numpy + matplotlib + pillow +
+  tqdm + pyyaml works: activate it and run `python main.py ...` directly. `uv.lock` exists only
+  to make the reference environment reproducible.
+
+### Alternative: an existing conda/pip env
 
 ```bash
-nvidia-smi --query-gpu=index,memory.free,utilization.gpu --format=csv,noheader
+PY=/path/to/envs/torch/bin/python
+$PY tests/test_sanity.py
+$PY main.py train --config configs/celeba_dit_rf.yml ...
 ```
 
-Pick GPUs **within one NUMA group** (0–3 or 4–5), preferring idle ones.
-Never touch other users' processes; if nothing is free, wait.
+## 2. Data
 
-## 2. Smoke tests (~2 min each)
+`data/` is gitignored, so it must be copied to the machine that trains:
 
 ```bash
-PY=/mnt/14T/houyi/miniconda3/envs/torch/bin/python
-mkdir -p logs
-
-# MNIST: exercises the whole loop without CelebA preprocessing
-$PY main.py train --config configs/mnist.yml --max-steps 30 --no-resume \
-     --run-name smoke_mnist
-
-# First CelebA run also extracts the zip and builds the uint8 cache (~20 min one-time)
-CUDA_VISIBLE_DEVICES=<free card> $PY main.py train \
-     --config configs/celeba_dit_rf.yml --max-steps 30 --no-resume \
-     --run-name smoke_dit_rf
+mkdir -p data/mnist
+# from the machine that holds the dataset:
+scp data/celeba.zip        <host>:dit-sys/data/
+scp data/mnist/mnist.pkl.gz <host>:dit-sys/data/mnist/
 ```
 
-## 3. Launch a full cell
+The first CelebA run extracts the zip and builds a **uint8** cache
+(`data/celeba_64_uint8.pt`, ~2.5GB) — one-time, ~20 min for 202k images.
 
-Keep the **global** batch at 800 (the frozen protocol): `--batch-size $((800 / NGPUS))`
-(e.g. 4 GPUs → 200). `steps/epoch` stays identical whatever the GPU count.
+## 3. Pre-flight (every session)
 
 ```bash
-TORCHRUN=/mnt/14T/houyi/miniconda3/envs/torch/bin/torchrun
-export WANDB_API_KEY=<key>                     # or run `torchrun` env's `wandb login`
+nvidia-smi --query-gpu=index,name,memory.free,utilization,gpu --format=csv,noheader
+```
 
-# D: DiT + rectified flow  (start here)
+On a shared box: never disturb another user's process, and if nothing is free — wait.
+A GPU that shows `0%` utilisation but holds memory is still someone's allocation.
+
+## 4. Smoke tests
+
+```bash
+uv run python tests/test_sanity.py                     # CPU invariants
+
+uv run python main.py train --config configs/mnist.yml \
+    --max-steps 30 --no-resume --run-name smoke_mnist   # ~1 min
+
+uv run python main.py train --config configs/celeba_dit_rf.yml \
+    --max-steps 30 --no-resume --run-name smoke_dit_rf  # + cache build on first run
+```
+
+`--max-steps 30` stops after 30 optimizer steps; check the printed loss, grad norm and the
+`samples/` grid before committing to a full run.
+
+## 5. Launching a cell
+
+Keep the **global** batch at 800 (the frozen protocol) — `steps/epoch` then stays identical
+regardless of GPU count:
+
+```bash
+NGPUS=4                     # GPUs you actually got
 CUDA_VISIBLE_DEVICES=0,1,2,3 NCCL_P2P_DISABLE=1 \
-  nohup $TORCHRUN --standalone --nproc_per_node=4 main.py train \
-  --config configs/celeba_dit_rf.yml --batch-size 200 --wandb \
+  nohup uv run torchrun --standalone --nproc_per_node=$NGPUS main.py train \
+  --config configs/celeba_dit_rf.yml --batch-size $((800 / NGPUS)) --wandb \
   > logs/dit_rf.log 2>&1 &
 
 tail -f logs/dit_rf.log
 ```
 
-Resume after an interruption: the configs have `resume: true`, so re-running the same
-command continues from `checkpoints/<run_name>_latest.pt`. Add `--no-resume` for a fresh
-start.
+- `NCCL_P2P_DISABLE=1` is required on topologies where P2P hangs (it was on the 6×A6000 box).
+- Long runs must be detached (`nohup`/`tmux`) — an SSH drop would otherwise kill them.
+- **Resume:** the configs set `resume: true`, so re-running the same command continues from
+  `checkpoints/<run_name>_latest.pt`. `--no-resume` forces a fresh start.
+- **W&B:** export `WANDB_API_KEY` (the key lives in the gitignored `.env` on the laptop) or
+  run `wandb login` inside the env. Drop `--wandb` to train without it.
+- **Order:** D (DiT+RF) → B (DiT+ε) → A (UNet+ε) → C (UNet+RF). D is the fastest path to a
+  result; C is the most expensive cell.
 
-## 4. Evaluation
+### How long a cell takes
+
+Derived from the measured FLOPs (training ≈ 3× forward), 253.7 steps/epoch, 300 epochs:
+
+| Cell | Forward GFLOPs/sample | Train FLOPs/step @800 | @20% MFU, 4×A6000 | @35% MFU |
+|---|---|---|---|---|
+| DiT (B, D) | 43.6 | 104.6 TFLOPs | ~18 h | ~10 h |
+| UNet (A, C) | 67.8 | 162.8 TFLOPs | ~28 h | ~16 h |
+| **all four** | | | **~3.8 days** | **~2.2 days** |
+
+Empirical anchor: the previous 300-epoch UNet run on this shared box spanned ~3 days of
+wall-clock. Treat ~1–2 days (DiT) and ~1.5–3 days (UNet) per cell as the planning range, and
+let the first cell calibrate — the printed `s/step` and MFU make the extrapolation explicit.
+
+## 6. Evaluation
 
 ```bash
-PY=/mnt/14T/houyi/miniconda3/envs/torch/bin/python
+PY="uv run python"        # or an existing env's interpreter
 
 # reference stats — once, ~5 min (writes eval/stats/celeba64_ref_pool3.npz)
 $PY eval/fid.py --build-ref
 
-# Tier 1 (10k samples) — sweeps
+# Tier 1 (10k samples) — sweeps while a run is still going
 $PY eval/fid.py --run-name celeba_dit_rf  --n 10000 --sampler euler  --nfe 4 8 16 32 64 128
 $PY eval/fid.py --run-name celeba_dit_eps --n 10000 --sampler ddim   --nfe 10 20 50
 $PY eval/fid.py --run-name celeba_unet_eps --n 10000 --sampler ancestral
 
 # Tier 2 (50k, sharded over GPUs) — final numbers only
-CUDA_VISIBLE_DEVICES=0,1,2,3 $TORCHRUN --standalone --nproc_per_node=4 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run torchrun --standalone --nproc_per_node=4 \
   eval/fid.py --run-name celeba_dit_rf --n 50000 --sampler euler --nfe 16
 ```
 
 Each call appends to `results/fid_<run_name>.json` (re-running the same
 sampler/NFE/weights combination overwrites that entry).
 
-## 5. Order of operations
+Cost accounting for a finished run:
 
-1. **D — DiT + RF** (fastest to a result)
-2. **B — DiT + eps**
-3. **A — UNet + eps** (retrained under the frozen protocol)
-4. **C — UNet + RF** (the expensive one)
+```bash
+uv run python eval/cost.py --config configs/celeba_dit_rf.yml \
+  --step-time 1.23 --batch-size 800 --gpu A6000
+```
 
-## 6. Gotchas
+## 7. Collecting results
 
-- `NCCL_P2P_DISABLE=1` is required — the topology hangs without it
-- Long jobs must run under `nohup`; the frp tunnel drops and would kill a foreground job
-- Run from the repo root (`checkpoints/`, `samples/`, `results/` are relative paths)
-- Copy `results/*.json` and `samples/*.png` back to the laptop when building the report
-  (they are the experiment archive and get committed later)
-- If a GPU is `0%` but has memory held by someone else's process, do not assume it is
-  free — check `nvidia-smi --query-compute-apps`
+```bash
+# back on the laptop
+scp -r <host>:dit-sys/results/*.json  results/
+scp -r <host>:dit-sys/samples/*.png   samples/
+uv run python eval/make_table.py --out reports/results.md
+```
+
+`results/*.json` is the raw archive behind every number in the report and is committed to the
+repo once the runs finish.
+
+## 8. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Hang at startup, no progress | `NCCL_P2P_DISABLE=1`; also check that all GPUs are in one NUMA group |
+| `torch.cuda.OutOfMemoryError` at batch 200/GPU | drop to 160/GPU with 5 GPUs (keeps the global 800) or note the protocol deviation |
+| OOM mid-run on a shared box | someone else grew their allocation — restart; `resume: true` continues |
+| Loss explodes / NaNs | gradient clipping is on (1.0); lower `--lr` (5e-4 collapsed in an earlier run) |
+| Sampling takes forever | `--sample-interval 0` disables the periodic grid; NFE is the real cost |
+| `--save-interval 0` | saves only at the final epoch (a `latest` checkpoint always exists) |
+| Everything ran but no metrics | check `results/<run>.json`; the run prints its path on exit |
+
+## 9. Machine notes (optional)
+
+### The shared 6×A6000 box (as of 2026-09-20)
+
+| | |
+|---|---|
+| SSH | `ssh -p 30153 houyi@frp-egg.com` (passwordless; the frp tunnel drops sometimes) |
+| Python | `/mnt/14T/houyi/miniconda3/envs/torch/bin/python` (torch 2.13+cu126, 6 GPUs) — **uv is not installed**, so use the conda env path above |
+| Topology | GPU 0–3 = NUMA 0 (PIX); 4–5 = NUMA 1; cross-group = SYS (**slow**) → keep DDP inside one group |
+| Disk | root 9.7GB / `/mnt/14T` 20GB free; `/mnt/15_14T` has 1.5TB but is not writable → hence the uint8 cache and the tight checkpoint budget |
+| GPUs | shared with other users; check before every launch |
