@@ -1,100 +1,121 @@
 # Diffusion Models from Scratch — DDPM → DiT → Rectified Flow
 
-从零实现（不依赖 diffusers）的扩散模型项目：用统一的**受控实验**对比 UNet/DDPM、DiT 与
-Rectified Flow 三种骨干与训练目标，配套 FID、NFE 采样效率与现代 ML systems 分析。
+*[中文版](README.zh-CN.md)*
 
-当前状态：2×2 受控实验（UNet/DiT × DDPM/rectified flow）的代码、评估与协议已就绪，
-训练待 GPU 空闲后进行；DDPM 基线已在 MNIST 28×28 与 CelebA 64×64 上完成 5-GPU DDP 训练。
-技术报告骨架见 [reports/tech_report.tex](reports/tech_report.tex)（NeurIPS 格式，结果待填），
-执行步骤见 [reports/runbook.md](reports/runbook.md)。
+A from-scratch diffusion implementation (no `diffusers`): a **controlled study** of two
+backbones (UNet vs. diffusion transformer) and two training objectives (ε-prediction vs.
+rectified flow) under one frozen protocol, plus measured trade-offs for samplers, mixed
+precision and distributed strategies.
 
-| MNIST 28×28（UNet 12M，170 epochs） | CelebA 64×64（UNet 174M，300 epochs） |
+![Quality–NFE frontier](figures/fid_vs_nfe.png)
+
+## Results
+
+### 1. MNIST 2×2 (four cells, 200 epochs each, identical protocol and seed)
+
+| Cell | Backbone + objective | Params | GFLOPs/sample | Best FID | NFE at that FID |
+|---|---|---|---|---|---|
+| A | UNet + ε | 11.7M | 2.43 | 2.79 | 1000 (ancestral) |
+| B | DiT + ε | 16.5M | 1.08 | 33.18 | 1000 (ancestral) |
+| C | UNet + flow | 11.7M | 2.43 | **0.88** | 64 (Euler) |
+| D | DiT + flow | 16.5M | 1.08 | 4.99 | 64 (Euler) |
+
+- Parameters are not compute: the transformer has *more* parameters and only 44% of the
+  UNet's FLOPs, so this is not a compute-matched comparison — the report says so explicitly
+- Rectified flow beats ε-prediction at every budget; the crossover sits near NFE 16
+
+![The four cells' samples](figures/mnist_2x2_samples.png)
+
+### 2. CelebA sampler study (one trained DDPM, only the sampler changes)
+
+| Sampler | NFE | n | FID | Throughput | Spread over 5×10k subsets |
+|---|---|---|---|---|---|
+| DDIM | 10 | 50k | 30.03 | 194 /s | 30.90 ± 0.15 |
+| DDIM | 20 | 50k | 17.79 | 97 /s | 18.72 ± 0.09 |
+| DDIM | 50 | 50k | **11.45** | 39 /s | 12.41 ± 0.08 |
+| ancestral | 1000 | 10k | 11.37 | 1.9 /s | — |
+
+**50 steps match 1000 (within 0.8%) at 20× the throughput.** The spread column also shows a
+methodological result: a 10k subset reads about one FID unit *high* for the same sampler, which
+is exactly why the frozen protocol requires reporting the subset spread.
+
+### 3. Systems (CelebA DiT, 160 images/GPU)
+
+![Execution settings](figures/systems_settings.png)
+
+| Setting | s/step | Peak GB | MFU | Relative |
+|---|---|---|---|---|
+| fp32 | 1.386 | 32.9 | 10.4% | 1.00× |
+| **bf16** | **0.442** | **21.1** | 32.7% | **3.15×** |
+| `torch.compile` | 1.415 | 32.9 | 10.4% | 1.00× |
+| fp32 + DDP (4 GPUs) | 1.408 | 33.5 | 10.1% | — |
+| fp32 + FSDP (4 GPUs) | 1.588 | 31.9 | 9.0% | **0.89× (a net loss)** |
+
+Kernel-level share of an fp32 training step: matmul 67.6% / elementwise 15.3% / attention
+11.1% / norm 2.3%.
+
+- **Mixed precision is the only lever that moves** (3.15× step rate, 1.6× memory);
+  `torch.compile` returns nothing
+- **FSDP is a net loss at this scale**: the peak is activation-dominated (parameters,
+  gradients and Adam state are ~2 GB of the 33.5 GB peak), so sharding saves little memory and
+  costs communication. Reported as a deliberate reverse benchmark.
+
+## One finding worth keeping
+
+**The NFE reduction a deterministic sampler offers is conditional on score accuracy.** The
+same DDIM implementation improves the UNet (FID 22.06 → 4.32 as NFE grows 10 → 50) and
+*degrades* the transformer (49 → 672), while 1000-step ancestral sampling of the same weights
+gives 33.2. Four checks localise it (not the EMA weights, not the model, not the sampler code)
+and an η sweep settles it: raising the noise-injection level from 0 to 1 moves the saturated
+pixel fraction from 0.48 to 0.79 and turns blobs back into digits. The deterministic path
+integrates score error coherently; the sampler's noise injection bounds the drift.
+
+Mixed precision shows the same signature: in a one-cell retrain, bf16 matched the fp32
+training loss to three digits (0.0194 vs. 0.0193) while doubling the 1000-step FID
+(5.56 vs. 2.79) and leaving the 50-step FID unchanged.
+
+> A paper reporting only the UNet numbers would ship a sampler recommendation that inverts on
+> the other backbone.
+
+## Layout
+
+```
+├── models/             # unet.py (residual U-Net), dit.py (adaLN-Zero, parameterised)
+├── diffusion/          # ddpm.py (ε + ancestral/DDIM), flow.py (rectified flow + Euler)
+├── eval/               # fid.py (self-built reference stats, NFE sweeps, subset spread),
+│                       # cost.py (measured FLOPs/MFU), systems.py (precision, profile,
+│                       # DDP/FSDP), eta_sweep.py + eps_error_by_t.py (the diagnostics),
+│                       # make_table.py (results → markdown)
+├── configs/            # four MNIST cells + four CelebA cells
+├── scripts/            # cheap_package.sh (5 stages, one command), tier2.sh, status.sh
+├── tests/              # 14 CPU-only invariants
+├── reports/            # technical report, runbook, figure scripts
+├── results/            # every experiment's raw archive (JSON)
+└── figures/            # figures used by the README and the report
+```
+
+## Reproduction
+
+```bash
+# environment (uv)
+uv sync && uv run python tests/test_sanity.py     # 14 CPU invariants, ~1 min
+
+# the whole package: MNIST 2x2 -> both FID sweeps -> systems -> figures
+GPUS=0,1,2,3 nohup bash scripts/cheap_package.sh &
+
+# progress / re-running a single point
+bash scripts/status.sh
+```
+
+The datasets (`celeba.zip`, `mnist.pkl.gz`) and trained checkpoints are not in the repo; see
+[reports/runbook.md](reports/runbook.md) for where to place them, the exact commands, the time
+budget and the troubleshooting table.
+
+## Documentation
+
+| | |
 |---|---|
-| ![MNIST](figures/mnist_epoch170.png) | ![CelebA](figures/celeba_epoch300.png) |
-
-## 亮点
-
-- **核心算法从零实现**：DDPM 前向/反向过程、UNet（正弦时间嵌入 / 残差块 / 中间层注意力）、
-  DiT（adaLN-Zero，无类别条件）、Rectified Flow（线性插值路径 + Euler ODE 采样）
-- **训练系统**：torchrun DDP（最多 5 GPU）、YAML 配置、断点续训、EMA、按 epoch 快照、cost accounting
-- **评估**：FID（reference stats 由训练张量自建，杜绝预处理不一致）、DDIM / Euler 的 NFE 扫描
-- **成本核算**：params / FLOPs（实测）/ step time / throughput / 显存 / MFU，每次训练自动写入
-  `results/*.json`；`eval/make_table.py` 直接生成报告用表格
-- **ML systems（进行中）**：torch.compile、Triton fused AdaLN、CUDA Graph 采样
-
-## 环境
-
-Python 3.10+，依赖由 [uv](https://docs.astral.sh/uv/) 管理：
-
-```bash
-uv sync              # 基础依赖（torch / numpy / matplotlib / pillow / tqdm / pyyaml）
-uv sync --extra log  # 额外安装 wandb（训练日志）
-```
-
-## 快速开始
-
-```bash
-# MNIST 2×2（四个单元，每格约 5 分钟；也是最快的冒烟路径）
-uv run python main.py train --config configs/mnist_unet_eps.yml
-uv run python main.py train --config configs/mnist_dit_eps.yml
-uv run python main.py train --config configs/mnist_unet_rf.yml
-uv run python main.py train --config configs/mnist_dit_rf.yml
-
-# CelebA 2×2 受控实验的四个单元
-uv run python main.py train --config configs/celeba_unet_eps.yml   # A: UNet + DDPM
-uv run python main.py train --config configs/celeba_dit_eps.yml    # B: DiT  + DDPM
-uv run python main.py train --config configs/celeba_unet_rf.yml    # C: UNet + rectified flow
-uv run python main.py train --config configs/celeba_dit_rf.yml     # D: DiT  + rectified flow
-
-# 5 卡 DDP
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 \
-  torchrun --standalone --nproc_per_node=5 main.py train --config configs/celeba_dit_rf.yml
-
-# 采样（默认取 EMA 权重）/ 去噪过程动画
-uv run python main.py sample --run-name celeba_dit_rf --n 64
-uv run python demo.py --dataset celeba
-```
-
-> 多卡服务器若遇通信挂起，设置 `NCCL_P2P_DISABLE=1`。
-> 冒烟测试：`uv run python tests/test_sanity.py`（CPU 可跑，13 项不变量检查）；
-> 上服务器正式跑之前可加 `--max-steps 50` 做快速验证。
-
-## 项目结构
-
-```
-├── models/             # 骨干网络
-│   ├── unet.py         # UNet（DDPM 基线）
-│   └── dit.py          # DiT：patchify + adaLN-Zero + SDPA
-├── diffusion/          # 扩散过程
-│   ├── ddpm.py         # DDPM：前向加噪 / ε 损失 / 祖先采样
-│   └── flow.py         # Rectified flow：线性插值路径 / v 损失 / Euler 采样
-├── configs/            # 四个实验单元 + MNIST 的 YAML 配置
-├── eval/               # 评估与计量
-│   ├── fid.py          # FID（自建 reference stats）+ NFE 扫描
-│   ├── cost.py         # FLOPs（实测）/ 参数量 / MFU
-│   └── make_table.py   # results/*.json -> markdown 表
-├── tests/              # 不变量与形状测试（CPU 可跑）
-├── reports/            # 技术报告与运行手册
-├── figures/            # 结果图
-├── train.py            # 训练循环、数据管线、EMA、checkpoint、cost accounting
-├── main.py             # CLI 入口（train / sample）
-├── demo.py             # 去噪过程可视化
-├── pyproject.toml      # uv 依赖定义
-└── uv.lock
-```
-
-## 实现说明
-
-- `diffusion/ddpm.py`：`forward_diffusion` 按 `x_t = √ᾱ_t·x₀ + √(1-ᾱ_t)·ε` 加噪；
-  `training_loss` 为预测噪声与真实噪声的 MSE；`sample` 执行祖先采样（可选返回整条去噪轨迹）。
-- `diffusion/flow.py`：约定 `t=0 → 数据`、`t=1 → 噪声`，`x_t = (1-t)·x₀ + t·ε`，
-  回归目标 `v = ε - x₀`；采样从 `t=1` 欧拉积分回 `t=0`。模型看到的时间步为 `t × 1000`
-  （正弦嵌入的有效区间是 [0, 1000]，与 DDPM 一致）。
-- `models/unet.py`：正弦时间嵌入经 MLP 注入每个残差块，瓶颈处接 SDPA 自注意力，
-  下采样/上采样之间用 skip connection 保留多尺度信息。
-- `models/dit.py`：patch 4 → 256 token，固定 2D sincos 位置编码，每块用 adaLN-Zero
-  （调制 MLP 零初始化，网络初始为恒等映射，实测初始输出恰为 0）。
-- `train.py`：数据管线（MNIST pkl / CelebA zip → 预处理缓存）、`--backbone` / `--objective`
-  开关、LR warmup + 余弦退火、梯度裁剪、EMA（老权重与 EMA 权重分别存盘）、
-  每 epoch 快照、每轮打印 loss / grad norm / 吞吐，结束时写出 `results/{run_name}.json`
-  （含 config、seed、git commit、显存峰值）。
+| Technical report (11 pages, NeurIPS format) | [reports/tech_report.pdf](reports/tech_report.pdf) |
+| Runbook (machine-agnostic) | [reports/runbook.md](reports/runbook.md) |
+| Figure scripts (data → PDF) | [reports/make_figures.py](reports/make_figures.py) |
+| Raw experiment archive | [results/](results/) |
