@@ -76,8 +76,8 @@ and rectified flow are all implemented in this repository, together with the tra
 pipeline, the sampler suite and the evaluation code. The study is organized as a controlled
 2$\times$2 design (UNet vs.\ DiT $\times$ $\epsilon$-prediction vs.\ rectified flow) at two
 scales, MNIST $28\times28$ and CelebA $64\times64$, with every cell trained under one frozen
-protocol. Headline results: DDIM at 50 function evaluations recovers the 1000-step ancestral
-FID to within 12\% on CelebA ($12.75$ vs.\ $11.37$) at $5.2\times$ the sampling throughput,
+protocol. Headline results: DDIM at 50 function evaluations matches the 1000-step ancestral
+sampler on CelebA (FID $11.45$ vs.\ $11.37$) at $20\times$ the sampling throughput,
 and rectified flow dominates the quality--NFE frontier on MNIST (FID $0.88$ at 64
 evaluations, versus $4.32$ for the best $\epsilon$-prediction sampler at 50). The same
 deterministic sampler that improves the UNet collapses on the transformer --- its FID grows
@@ -127,24 +127,24 @@ as the ones that worked.
   \label{tab:glance}
   \centering
   \small
-  \begin{tabular}{@{}llp{0.5\linewidth}@{}}
+  \begin{tabular}{@{}llp{0.42\linewidth}@{}}
     \toprule
     Question & Baseline & Measured effect \\
     \midrule
-    RQ1 backbone & UNet (11.7M params, 2.43 GFLOPs/sample) &
+    RQ1 backbone & UNet (11.7M, 2.43 GFLOPs/sample) &
       DiT (16.5M, 1.08): worse FID at every matched budget
       (MNIST $\epsilon$: $2.79$ vs.\ $33.2$; flow: $0.88$ vs.\ $4.99$) despite $2.25\times$
       fewer FLOPs \\
     RQ2 objective & $\epsilon$-prediction &
       rectified flow: FID $0.88$ vs.\ $4.32$ at NFE 64 vs.\ 50; crossover near NFE 16 \\
     RQ2 sampler & DDPM ancestral (1000 NFE) &
-      DDIM at 50 NFE: FID $12.75$ vs.\ $11.37$ on CelebA ($5.2\times$ throughput);
+      DDIM at 50 NFE: FID $11.45$ vs.\ $11.37$ on CelebA at $20\times$ the throughput;
       collapses on the DiT ($49\!\rightarrow\!672$ as NFE $10\!\rightarrow\!50$) \\
     RQ3 systems & FP32, uncompiled &
       BF16 $3.15\times$ step time, peak memory $32.9\!\rightarrow\!21.1$\,GB, MFU
       $10.4\%\!\rightarrow\!32.7\%$; \texttt{compile} $1.00\times$ \\
     RQ3 profile & --- &
-      matmul 67.1\%, elementwise 15.6\%, attention 11.1\%; the fused-adaLN target is the
+      matmul 67.6\%, elementwise 15.3\%, attention 11.1\%; the fused-adaLN target is the
       elementwise slice \\
     \bottomrule
   \end{tabular}
@@ -244,13 +244,20 @@ velocity-predicting network, so they can be compared at fixed weights.
 \label{sec:setup}
 %=============================================================================
 
-\textbf{Hardware.} TODO: fill in the machine actually used (GPU model, interconnect,
-NUMA layout). The topology matters: on the six-A6000 node used for the systems numbers,
-GPUs 0--3 and 4--5 sit in different NUMA domains and the cross-domain link is an order of
-magnitude slower, which is why \texttt{NCCL\_P2P\_DISABLE=1} is required and why DDP is kept
-inside one domain.
+\textbf{Hardware.} One node with six NVIDIA RTX A6000 GPUs (48\,GB each) connected over
+PCIe with \emph{no} NVLink. The GPUs span two NUMA domains --- 0--3 on one socket, 4--5 on
+the other --- and the cross-domain link traverses PCIe \emph{and} the inter-socket
+interconnect. This topology is why every multi-GPU measurement in this report runs inside a
+single domain and sets \texttt{NCCL\_P2P\_DISABLE=1} (Section~\ref{sec:failures}).
 
-\textbf{Protocol.} All cells of a scale share one frozen protocol: identical optimizer,
+The node is shared, and that is part of the measurement conditions rather than an aside:
+during these runs four other training jobs held between 0.5 and 47\,GB on the remaining
+cards, so the GPU was never exclusively ours. The single-GPU settings sweep (30 steps plus
+five discarded warmups, coefficient of variation 0.1--0.6\%) is the least exposed to that
+contention; the throughput columns of the FID tables are global rates from 4-GPU sharded
+sweeps and should be read as such. Software: Python 3.11 and PyTorch 2.13.0 (+cu126).
+
+\textbf{Protocol.} All MNIST cells share one frozen protocol: identical optimizer,
 learning-rate schedule, batch size (global), EMA decay and seed (Table~\ref{tab:protocol}).
 Unlike recipes that tune each cell separately, this design means a difference between cells
 is attributable to the backbone or the objective rather than to the optimizer.
@@ -308,26 +315,36 @@ The practical promise of DDIM is that a fixed trained model can be sampled in fa
 network evaluations. Table~\ref{tab:celeba-samplers} answers that for the existing CelebA
 DDPM checkpoint (UNet, 174.1M parameters, 300 epochs, trained before this protocol freeze).
 Quality improves monotonically with the budget, and the 50-step deterministic sampler lands
-within 12\% of the 1000-step ancestral sampler at $5.2\times$ the throughput: the last 950
-evaluations of the ancestral chain buy 1.4 FID points and cost 5.9 hours per 50k-sample
-evaluation. The 10-step sampler is the other end of the trade --- $100\times$ fewer
-evaluations for $2.8\times$ the FID.
+within 1\% of the 1000-step ancestral sampler while running $20\times$ faster: the last 950
+evaluations of the ancestral chain buy 0.1 FID points and cost 7.1 hours per 50k-sample
+evaluation. The 10-step sampler is the other end of the trade --- $5\times$ fewer evaluations
+than the 50-step sampler for $2.6\times$ the FID.
+
+The spread column is worth reading carefully. A 10k subset reads about 1 FID unit *higher*
+than the 50k measurement of the same sampler ($12.41 \pm 0.08$ vs.\ $11.45$ for DDIM at 50
+NFE), which means the 10k ancestral number in the last row is if anything pessimistic: the
+two rows' gap on equal footing is smaller than the table's raw numbers suggest. This is the
+sample-count dependence the frozen protocol's variability requirement exists to expose, and
+it is why the deterministic rows here are reported at 50k.
 
 \begin{table}[t]
-  \caption{CelebA $64^2$: one trained model, four sampling budgets (10k samples each, EMA
-  weights). Throughput is measured on the same runs; the last column projects the cost of a
-  50k-sample evaluation.}
+  \caption{CelebA $64^2$: one trained model, four sampling budgets (EMA weights). The
+  deterministic rows are the 50k-sample tier; the ancestral row is the 10k tier because the
+  1000-step sampler costs $20\times$ more per sample (see the throughput column), and the
+  protocol's exception for it is recorded with the results. ``Spread'' is the FID across
+  five random 10k subsets of the generated features --- what the 10k protocol would have
+  reported.}
   \label{tab:celeba-samplers}
   \centering
   \small
-  \begin{tabular}{@{}lrrrr@{}}
+  \begin{tabular}{@{}lrrrrrr@{}}
     \toprule
-    Sampler & NFE & FID & samples/s & 50k evaluation \\
+    Sampler & NFE & $n$ & FID & spread (5$\times$10k) & samples/s & 50k evaluation \\
     \midrule
-    DDIM      & 10   & 31.40 & 49.5 & 17 min \\
-    DDIM      & 20   & 19.13 & 24.8 & 34 min \\
-    DDIM      & 50   & 12.75 &  9.9 & 1.4 h \\
-    ancestral & 1000 & 11.37 &  1.9 & 7.3 h \\
+    DDIM      & 10   & 50k & 30.03 & $30.90 \pm 0.15$ & 194.2 & 4.3 min \\
+    DDIM      & 20   & 50k & 17.79 & $18.72 \pm 0.09$ &  97.0 & 8.6 min \\
+    DDIM      & 50   & 50k & 11.45 & $12.41 \pm 0.08$ &  38.8 & 21 min \\
+    ancestral & 1000 & 10k & 11.37 & --- &   1.9 & 7.3 h \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -521,7 +538,7 @@ backbones, which is what makes it credible.
   \centering
   \fig[width=2.65in]{figures/profile_breakdown.pdf}
   \caption{Where GPU time goes in a diffusion training step, by kernel category. This is a
-  per-kernel accounting, which is precisely what a FLOPs count hides: the 15.6\% spent on
+  per-kernel accounting, which is precisely what a FLOPs count hides: the 15.3\% spent on
   elementwise work does not appear in the 46.0 GFLOPs/sample figure at all.}
   \label{fig:profile}
 \end{figure}
@@ -530,6 +547,18 @@ backbones, which is what makes it credible.
 less peak memory, and nothing else we tried moves the needle. That single number is what makes
 the larger-scale experiments in this project affordable at all: the CelebA cells below cost
 $\sim$36 and $\sim$55 GPU-hours in fp32 and under 12 and 18 in bf16.
+
+\textbf{\dots and it is not free.} Acting on the previous paragraph, one MNIST cell was
+retrained under the identical protocol with the training step autocast to bf16 --- the point
+being to price the speedup instead of assuming it. The training loss is unchanged to three
+digits ($0.0194$ vs.\ $0.0193$), but the sampled quality is not: the bf16 checkpoint scores
+FID $5.56$ where the fp32 one scores $2.79$ on the 1000-step ancestral sampler, while the two
+sit within noise of each other at 50 steps ($4.10$ vs.\ $4.32$). That is the same signature
+Section~\ref{sec:samplers} found for the transformer --- an error the long trajectory
+accumulates and the short one hides --- appearing here from precision rather than from
+training. One cell and one seed is thin evidence, and we report it as an observation, not a
+law; but it is enough that we do not quote $3.15\times$ as free, and it is why no quality
+number in this report comes from a mixed-precision run.
 
 \textbf{Compilation buys nothing here.} \texttt{torch.compile} returns $1.00\times$ --- the same
 step time to three digits --- which is a negative result worth stating plainly. Two
@@ -549,7 +578,7 @@ cards, that condition is not met.
 measured FLOPs (46.0 GFLOPs per sample, forward, counted by
 \texttt{torch.utils.flop\_counter}) against the A6000's dense peak. Two caveats apply: the
 counter covers matmul and convolution work only, so elementwise-heavy operations are invisible
-to it (a fused-adaLN kernel would have to earn its keep out of the 15.6\% slice in
+to it (a fused-adaLN kernel would have to earn its keep out of the 15.3\% slice in
 Fig.~\ref{fig:profile}, not out of the FLOPs number); and this is a 130M-parameter model at
 256 tokens, so neither the batch nor the sequence length is large enough to saturate tensor
 cores. The honest summary is that bf16 moved this workload from "not using the tensor cores"
@@ -640,9 +669,11 @@ compute" rather than as a claim about transformers in general.
         confidence interval on the model.
   \item FLOPs counts cover matmul and convolution work only, so the MFU figures are a
         matmul-utilisation proxy rather than a hardware limit.
-  \item The reported timings use fp32 training. bf16 was measured for \emph{speed}
-        (Table~\ref{tab:cost}) but its effect on sample quality was not measured, so no
-        quality number in this report comes from a mixed-precision run.
+  \item The reported timings use fp32 training, and no quality number in this report comes
+        from a mixed-precision run. bf16 was measured for speed (Table~\ref{tab:cost}) and,
+        in one cell, for quality: the training loss matched to three digits while the
+        1000-step FID doubled. That is one seed and one cell --- an observation, not a
+        characterisation of where the boundary lies.
   \item The transformer's deterministic-sampler collapse (Section~\ref{sec:samplers}) is
         characterised at one scale with one model. The $\eta$ sweep localises the mechanism
         --- the absence of noise injection --- but where the boundary lies, and whether it
