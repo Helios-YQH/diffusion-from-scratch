@@ -17,7 +17,9 @@ an already-working conda/pip environment is a drop-in alternative.
 ### Default: uv
 
 ```bash
-git clone git@gitee.com:hy_ucas/dit-sys.git && cd dit-sys
+# GitHub is the primary remote; the Gitee mirror is faster from inside China
+git clone git@github.com:Helios-YQH/diffusion-from-scratch.git && cd diffusion-from-scratch
+# or: git clone git@gitee.com:hy_ucas/dit-sys.git && cd dit-sys
 uv sync              # torch, numpy, matplotlib, pillow, tqdm, pyyaml
 uv sync --extra log  # + wandb
 uv run python tests/test_sanity.py     # 14 CPU invariants, ~1 min, no GPU needed
