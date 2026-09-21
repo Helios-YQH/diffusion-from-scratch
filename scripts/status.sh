@@ -33,7 +33,7 @@ done
 
 echo
 echo "=========== 最近的主日志 ==========="
-LOG=$(ls -t logs/cheap_package_*.log 2>/dev/null | head -1)
+LOG=$(ls -t logs/cheap_package_*.log logs/tier2_*.log 2>/dev/null | head -1)
 if [ -n "$LOG" ]; then
   echo "  ($LOG)"
   grep -avE "^\s*$" "$LOG" | tail -8 | cut -c1-150 | sed 's/^/  /'

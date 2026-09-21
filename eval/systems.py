@@ -155,6 +155,9 @@ def main():
                    help="Also report the per-category GPU-time breakdown")
     p.add_argument("--ddp", action="store_true",
                    help="Wrap in DDP (use under torchrun for the communication share)")
+    p.add_argument("--fsdp", action="store_true",
+                   help="Wrap in FSDP instead of DDP — the reverse benchmark: at this "
+                        "model scale the sharding is expected to cost more than it saves")
     args = p.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -162,7 +165,7 @@ def main():
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    is_distributed = args.ddp and world_size > 1
+    is_distributed = (args.ddp or args.fsdp) and world_size > 1
     if is_distributed:
         dist.init_process_group(backend="nccl")
         torch.cuda.set_device(local_rank)
@@ -195,12 +198,25 @@ def main():
         model, _, _ = build_model_from_config(args.config)
         model = model.to(device)
         diffusion = make_diffusion(model, cfg, device)
-        bench_model = DDP(model, device_ids=[local_rank]) if is_distributed else model
+        if args.fsdp and is_distributed:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            bench_model = FSDP(model, device_id=torch.cuda.current_device())
+            suffix = "+fsdp"
+        elif is_distributed:
+            bench_model = DDP(model, device_ids=[local_rank])
+            suffix = "+ddp"
+        else:
+            bench_model = model
+            suffix = ""
+        # The diffusion object holds its own reference to the model; point it at
+        # the wrapped module or the forward (and, for FSDP, the parameter
+        # all-gather) would bypass the wrapper entirely.
+        diffusion.model = bench_model
         bf16 = "bf16" in setting
         compile_model = "compile" in setting
         res = benchmark(bench_model, diffusion, cfg, device, batch_size,
                         args.steps, args.warmup, bf16, compile_model,
-                        setting if not is_distributed else f"{setting}+ddp")
+                        setting + suffix)
         res["world_size"] = world_size
         res["global_throughput_img_s"] = res["throughput_img_s"] * world_size
         if peak_flops:

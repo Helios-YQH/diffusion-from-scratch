@@ -172,6 +172,22 @@ def compute_stats(feats):
     return arr.mean(axis=0), np.cov(arr, rowvar=False)
 
 
+def fid_variability(feats, mu_ref, sigma_ref, subset_size, n_subsets=5, seed=0):
+    """FID spread across random subsets of the generated features.
+
+    Reported as variability (what 10k samples would have given), not as a
+    confidence interval on the model.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    n = feats.shape[0]
+    out = []
+    for _ in range(n_subsets):
+        idx = torch.randperm(n, generator=gen)[:subset_size]
+        mu, sigma = compute_stats(feats[idx])
+        out.append(fid_from_stats(mu_ref, sigma_ref, mu, sigma))
+    return out
+
+
 def _sqrtm_psd(mat):
     """Symmetric PSD matrix square root (scipy-free, exact for PSD input)."""
     mat = (mat + mat.T) / 2.0
@@ -354,6 +370,10 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=64, help="Sampling batch size")
     p.add_argument("--feat-batch", type=int, default=64)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--variability", action="store_true",
+                   help="Also report the FID spread across 5 random subsets "
+                        "(what the 10k-sample protocol would have given)")
+    p.add_argument("--subset-size", type=int, default=10000)
     p.add_argument("--tag", type=str, default=None, help="JSON name suffix")
     args = p.parse_args()
     if args.data is None:
@@ -461,6 +481,13 @@ def main():
             print(f"  FID = {fid:.3f}   (n={n_total}, weights={args.weights}, "
                   f"{img_s:.1f} img/s)" if img_s else
                   f"  FID = {fid:.3f}   (n={n_total}, weights={args.weights})")
+
+            var = None
+            if args.variability and n_total >= 5 * args.subset_size:
+                var = fid_variability(feats, mu_ref, sigma_ref, args.subset_size)
+                print(f"  variability across 5 x {args.subset_size} subsets: "
+                      f"{np.mean(var):.3f} +- {np.std(var):.3f}")
+
             records = [r for r in records
                        if not (r["sampler"] == args.sampler
                                and r["nfe"] == nfe_used
@@ -468,6 +495,8 @@ def main():
             records.append({"run_name": run_name, "sampler": args.sampler,
                             "nfe": nfe_used, "n": n_total,
                             "weights": args.weights, "fid": fid,
+                            "fid_subset_mean": float(np.mean(var)) if var else None,
+                            "fid_subset_std": float(np.std(var)) if var else None,
                             "feature_net": args.feature_net,
                             "sampling_img_s": img_s,
                             "git_commit": _git_commit()})
