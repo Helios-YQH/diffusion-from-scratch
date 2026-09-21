@@ -5,34 +5,40 @@
       "run_name": "ddpm_celeba",
       "sampler": "ddim",
       "nfe": 10,
-      "n": 10000,
+      "n": 50000,
       "weights": "ema",
-      "fid": 31.397761400441766,
+      "fid": 30.03429580492255,
+      "fid_subset_mean": 30.895976614055762,
+      "fid_subset_std": 0.1517344363165242,
       "feature_net": "inception",
-      "sampling_img_s": 49.463302627850695,
-      "git_commit": "21e67d2"
+      "sampling_img_s": 194.23619733325935,
+      "git_commit": "4da1725"
     },
     {
       "run_name": "ddpm_celeba",
       "sampler": "ddim",
       "nfe": 20,
-      "n": 10000,
+      "n": 50000,
       "weights": "ema",
-      "fid": 19.132672047846825,
+      "fid": 17.789390773990903,
+      "fid_subset_mean": 18.720491095649443,
+      "fid_subset_std": 0.08924674356523041,
       "feature_net": "inception",
-      "sampling_img_s": 24.80502506286567,
-      "git_commit": "21e67d2"
+      "sampling_img_s": 96.96189227192887,
+      "git_commit": "4da1725"
     },
     {
       "run_name": "ddpm_celeba",
       "sampler": "ddim",
       "nfe": 50,
-      "n": 10000,
+      "n": 50000,
       "weights": "ema",
-      "fid": 12.747963939146047,
+      "fid": 11.453041576810136,
+      "fid_subset_mean": 12.413015750051324,
+      "fid_subset_std": 0.08055559837325554,
       "feature_net": "inception",
-      "sampling_img_s": 9.923018954130807,
-      "git_commit": "21e67d2"
+      "sampling_img_s": 38.76767994554353,
+      "git_commit": "4da1725"
     },
     {
       "run_name": "ddpm_celeba",

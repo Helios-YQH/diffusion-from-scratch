@@ -6,6 +6,10 @@ Data sources (all produced by the scripts in this repo):
   * ../results/systems_<cfg>.json   step time, memory, MFU, profile (eval/systems.py)
   * ../samples/<run>_epoch<N>.png   EMA sample grids               (main.py train ...)
 
+Run this where the data lives (sync ../results and ../samples first if you are
+on another machine — figures generated against stale inputs are how the first
+draft of this file shipped a CelebA grid under a caption about MNIST cells).
+
 Sizes follow the NeurIPS layout conventions used in the CS336 reports: 5.5in
 full text width, 8pt type, STIX fonts to match the Times body text.
 
@@ -37,6 +41,16 @@ FULL_W, COL_W = 5.5, 2.65
 BLUE, ORANGE, GREEN, RED = "#0072B2", "#E69F00", "#009E73", "#D55E00"
 PURPLE, SKY, GREY, LIGHTGREY = "#CC79A7", "#56B4E9", "#8C8C8C", "#BFBFBF"
 
+# One fixed colour and label per cell, shared by every figure.
+CELL_STYLE = {
+    "mnist_unet_eps": ("A: UNet $+$ $\\epsilon$", BLUE, "o"),
+    "mnist_dit_eps": ("B: DiT $+$ $\\epsilon$", ORANGE, "s"),
+    "mnist_unet_rf": ("C: UNet $+$ flow", GREEN, "^"),
+    "mnist_dit_rf": ("D: DiT $+$ flow", RED, "v"),
+    "ddpm_celeba": ("CelebA: UNet $+$ $\\epsilon$", PURPLE, "o"),
+}
+DATASET_OF = lambda run: "CelebA" if run.startswith("ddpm") else "MNIST"  # noqa: E731
+
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["STIXGeneral", "DejaVu Serif"],
@@ -44,7 +58,7 @@ plt.rcParams.update({
     "font.size": 8,
     "axes.titlesize": 9,
     "axes.labelsize": 8,
-    "legend.fontsize": 7,
+    "legend.fontsize": 6.5,
     "xtick.labelsize": 7,
     "ytick.labelsize": 7,
     "axes.spines.top": False,
@@ -66,81 +80,103 @@ def _load(pattern):
             for p in sorted(RESULTS.glob(pattern))]
 
 
-# ── Figure: the two probability paths (schematic) ─────────────────────
+def _best_points(run_json):
+    """One entry per (sampler, nfe): the largest-n variant wins.
+
+    A point can be measured at several sample counts (10k and 50k tiers);
+    plotting both would zig-zag the curve with sampling noise.
+    """
+    best = {}
+    for r in run_json.get("runs", []):
+        key = (r["sampler"], r["nfe"])
+        if key not in best or r["n"] > best[key]["n"]:
+            best[key] = r
+    return sorted(best.values(), key=lambda r: r["nfe"])
+
+
+# ── Figure: the two probability paths, from the real schedule ─────────
 
 def fig_paths():
-    t = np.linspace(0, 1, 200)
-    fig, ax = plt.subplots(figsize=(COL_W, 1.9))
-    # diffusion: data at t=0, noise at t=1, curved (non-constant speed)
-    ax.plot(t, (1 - t) ** 0.6, color=BLUE, lw=1.4, label="DDPM (curved)")
-    ax.plot(t, 1 - t, color=ORANGE, lw=1.4, ls="--", label="rectified flow (straight)")
-    ax.annotate("data", xy=(0, 1.0), xytext=(0.02, 1.04), color=GREY, fontsize=7)
-    ax.annotate("noise", xy=(1, 0.0), xytext=(0.86, -0.06), color=GREY, fontsize=7)
-    ax.set_xlabel("t  (0 = data, 1 = noise)")
-    ax.set_ylabel("signal")
+    """Coefficients of the two paths, computed rather than sketched.
+
+    Diffusion: sqrt(alpha_bar_t) from the linear beta schedule the code uses.
+    Flow: 1 - t. Both are the actual signal coefficients on the path.
+    """
+    T, beta_start, beta_end = 1000, 1e-4, 0.02
+    betas = np.linspace(beta_start, beta_end, T)
+    alpha_bar = np.cumprod(1.0 - betas)
+    t = np.linspace(0.0, 1.0, T)          # 0 = data, 1 = noise
+
+    fig, ax = plt.subplots(figsize=(COL_W, 1.85))
+    ax.plot(t, np.sqrt(alpha_bar), color=BLUE, lw=1.4,
+            label=r"DDPM: $\sqrt{\bar\alpha_t}$")
+    ax.plot(t, 1.0 - t, color=ORANGE, lw=1.4, ls="--",
+            label=r"rectified flow: $1-t$")
+    ax.annotate("data", xy=(0, 1.0), xytext=(0.01, 1.04), color=GREY, fontsize=7)
+    ax.annotate("noise", xy=(1, 0.0), xytext=(0.84, -0.07), color=GREY, fontsize=7)
+    ax.set_xlabel("$t$  (0 = data, 1 = noise)")
+    ax.set_ylabel("signal coefficient")
     ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(-0.1, 1.12)
-    ax.legend(frameon=False, loc="upper right")
+    ax.set_ylim(-0.08, 1.1)
+    ax.legend(frameon=False, loc="lower left", handlelength=1.6)
     save(fig, "paths")
 
 
-# ── Figures from eval/fid.py output ───────────────────────────────────
-
-def fig_fid_vs_nfe():
+def _fid_panels(key, ylabel, logy, value_key="fid"):
+    """Shared two-panel layout for the FID and throughput figures."""
     data = _load("fid_*.json")
     if not data:
-        print("  [skip] fid_vs_nfe: no results/fid_*.json yet")
-        return
-
-    # Split by dataset: the CelebA FIDs sit an order of magnitude above the
-    # MNIST ones, so a shared axis would flatten both.
-    groups = {"MNIST $28^2$": [], "CelebA $64^2$": []}
+        print(f"  [skip] {key}: no results/fid_*.json yet")
+        return None
+    groups = {"MNIST": [], "CelebA": []}
     for d in data:
-        key = "MNIST $28^2$" if d["run_name"].startswith("mnist") else "CelebA $64^2$"
-        groups[key].append(d)
+        groups[DATASET_OF(d["run_name"])].append(d)
 
-    colors = [BLUE, ORANGE, GREEN, RED, PURPLE, SKY]
-    fig, axes = plt.subplots(1, 2, figsize=(FULL_W, 2.0))
-    for ax, (title, runs) in zip(axes, groups.items()):
-        for d, color in zip(sorted(runs, key=lambda x: x["run_name"]), colors):
-            pts = sorted(d["runs"], key=lambda r: r["nfe"])
+    titles = {"MNIST": "MNIST $28^2$", "CelebA": "CelebA $64^2$"}
+    fig, axes = plt.subplots(1, 2, figsize=(FULL_W, 2.15))
+    for ax, (key_name, runs) in zip(axes, groups.items()):
+        plotted = False
+        for d in sorted(runs, key=lambda x: x["run_name"]):
+            if d["run_name"] not in CELL_STYLE:
+                continue          # e.g. the bf16 precision run: not a cell
+            label, color, marker = CELL_STYLE[d["run_name"]]
+            pts = [p for p in _best_points(d) if p.get(value_key)]
             if not pts:
                 continue
-            ax.plot([r["nfe"] for r in pts], [r["fid"] for r in pts],
-                    marker="o", ms=3, lw=1.2, color=color,
-                    label=d["run_name"].replace("mnist_", "").replace("ddpm_", ""))
+            swept = [(p["nfe"], p[value_key]) for p in pts if p["sampler"] != "ancestral"]
+            base = [(p["nfe"], p[value_key]) for p in pts if p["sampler"] == "ancestral"]
+            if swept:
+                ax.plot(*zip(*swept), marker=marker, ms=3.2, lw=1.2, color=color,
+                        label=label)
+                plotted = True
+            if base:
+                ax.plot(*zip(*base), marker="*", ms=8, ls="none", color=color)
+        if plotted:
+            # one shared entry for the reference point instead of one per cell
+            ax.plot([], [], marker="*", ls="none", ms=8, color=GREY,
+                    label="ancestral 1000 NFE")
         ax.set_xscale("log", base=2)
-        ax.set_yscale("log")
+        if logy:
+            ax.set_yscale("log")
         ax.set_xlabel("NFE (function evaluations)")
-        ax.set_ylabel("FID")
-        ax.set_title(title, fontsize=8)
-        ax.legend(frameon=False, fontsize=6,
-                  loc="lower left" if "MNIST" in title else "upper right",
-                  handlelength=1.4, borderpad=0.2)
+        ax.set_ylabel(ylabel)
+        ax.set_title(titles[key_name], fontsize=8)
+        ax.legend(frameon=False, loc="best", handlelength=1.5, borderpad=0.2)
     fig.tight_layout()
-    save(fig, "fid_vs_nfe")
+    return fig
+
+
+def fig_fid_vs_nfe():
+    fig = _fid_panels("fid_vs_nfe", "FID", logy=True)
+    if fig:
+        save(fig, "fid_vs_nfe")
 
 
 def fig_throughput_vs_nfe():
-    data = _load("fid_*.json")
-    if not data or not any(r.get("sampling_img_s") for d in data for r in d["runs"]):
-        print("  [skip] throughput_vs_nfe: no sampling throughput recorded yet")
-        return
-    fig, ax = plt.subplots(figsize=(COL_W, 2.1))
-    colors = [BLUE, ORANGE, GREEN, RED, PURPLE, SKY]
-    for d, color in zip(data, colors):
-        runs = [r for r in sorted(d["runs"], key=lambda r: r["nfe"])
-                if r.get("sampling_img_s")]
-        if not runs:
-            continue
-        ax.plot([r["nfe"] for r in runs], [r["sampling_img_s"] for r in runs],
-                marker="o", ms=3, lw=1.2, color=color, label=d["run_name"])
-    ax.set_xscale("log", base=2)
-    ax.set_yscale("log")
-    ax.set_xlabel("NFE")
-    ax.set_ylabel("samples / s")
-    ax.legend(frameon=False)
-    save(fig, "throughput_vs_nfe")
+    fig = _fid_panels("throughput_vs_nfe", "samples / s", logy=True,
+                      value_key="sampling_img_s")
+    if fig:
+        save(fig, "throughput_vs_nfe")
 
 
 # ── Figures from eval/systems.py output ───────────────────────────────
@@ -150,23 +186,36 @@ def fig_systems_settings():
     if not data:
         print("  [skip] systems_settings: no results/systems_*.json yet")
         return
-    names = [Path(d["config"]).stem for d in data]
-    settings = sorted({r["setting"] for d in data for r in d["results"]})
-    x = np.arange(len(names))
-    width = 0.8 / max(len(settings), 1)
-    fig, ax = plt.subplots(figsize=(COL_W, 2.1))
-    colors = [BLUE, ORANGE, GREEN, RED]
-    for i, setting in enumerate(settings):
-        vals = []
-        for d in data:
-            match = [r for r in d["results"] if r["setting"] == setting]
-            vals.append(match[0]["step_time_s"] * 1e3 if match else np.nan)
-        ax.bar(x + i * width - 0.4 + width / 2, vals, width * 0.9,
-               color=colors[i % len(colors)], label=setting)
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=20, ha="right")
-    ax.set_ylabel("ms / step")
-    ax.legend(frameon=False, ncol=2)
+    rows = [(r["setting"], r["step_time_s"] * 1e3, r.get("mfu"),
+             r["peak_memory_gb"]) for r in data[0]["results"]]
+    single = [r for r in rows if "ddp" not in r[0] and "fsdp" not in r[0]]
+    multi = [r for r in rows if "ddp" in r[0] or "fsdp" in r[0]]
+    single.sort(key=lambda x: x[1])
+    multi.sort(key=lambda x: x[1])
+
+    # The 4-GPU rows do 4x the work per step, so their baseline is DDP, not the
+    # single-GPU fp32 row — comparing them across groups would be meaningless.
+    base_single = next((r[1] for r in single if r[0].startswith("fp32")), None)
+    base_multi = next((r[1] for r in multi if r[0].endswith("ddp")), None)
+
+    fig, ax = plt.subplots(figsize=(COL_W, 2.2))
+    ys = list(range(len(single))) + [len(single) + 0.6 + i for i in range(len(multi))]
+    names = [r[0] + ("  (4 GPU)" if r in multi else "") for r in single + multi]
+    ms = [r[1] for r in single + multi]
+    colors = [ORANGE if "bf16" in n_ else BLUE if n_.startswith("fp32") else GREY
+              for n_ in names]
+    bars = ax.barh(ys, ms, color=colors, height=0.62)
+    for bar, y, (name, val, mfu, mem) in zip(bars, ys, single + multi):
+        in_multi = (name, val, mfu, mem) in multi
+        base = base_multi if in_multi else base_single
+        speed = f"{base / val:.2f}$\\times$ vs {'DDP' if in_multi else 'fp32'}"
+        txt = f"{val:.0f} ms   {speed}" + (f"   ({mem:.1f} GB)" if in_multi else "")
+        ax.text(val * 1.02, y, txt, va="center", fontsize=6, color="#333333")
+    ax.set_yticks(ys)
+    ax.set_yticklabels(names)
+    ax.set_xlabel("ms / step (CelebA DiT, 160 images/GPU)")
+    ax.set_xlim(0, max(ms) * 1.62)
+    ax.set_ylim(max(ys) + 0.6, -0.6)
     save(fig, "systems_settings")
 
 
@@ -175,49 +224,53 @@ def fig_profile_breakdown():
     if not data:
         print("  [skip] profile_breakdown: no --profile run recorded yet")
         return
-    labels = sorted({k for d in data for k in d["profile_fractions"]})
-    colors = {"matmul": BLUE, "attention": ORANGE, "conv": GREEN, "norm": RED,
-              "elementwise": PURPLE, "communication": SKY, "other": LIGHTGREY}
-    fig, ax = plt.subplots(figsize=(COL_W, 1.8))
-    x = np.arange(len(data))
-    bottom = np.zeros(len(data))
-    for label in labels:
-        vals = np.array([d["profile_fractions"].get(label, 0.0) for d in data]) * 100
-        ax.bar(x, vals, bottom=bottom, color=colors.get(label, GREY), label=label)
-        bottom += vals
-    ax.set_xticks(x)
-    ax.set_xticklabels([Path(d["config"]).stem for d in data], rotation=20, ha="right")
-    ax.set_ylabel("% of GPU time")
-    ax.legend(frameon=False, ncol=4, fontsize=6)
+    fracs = data[0]["profile_fractions"]
+    colors = {"matmul": BLUE, "attention": SKY, "elementwise": ORANGE,
+              "norm": GREEN, "conv": RED, "other": LIGHTGREY}
+    labels = sorted([k for k in fracs if fracs[k] > 0], key=lambda k: fracs[k])
+    vals = [fracs[k] * 100 for k in labels]
+
+    fig, ax = plt.subplots(figsize=(COL_W, 1.65))
+    bars = ax.barh(labels, vals, color=[colors.get(k, GREY) for k in labels],
+                   height=0.62)
+    for bar, val in zip(bars, vals):
+        ax.text(val + 1.2, bar.get_y() + bar.get_height() / 2, f"{val:.1f}%",
+                va="center", fontsize=6.5, color="#333333")
+    ax.set_xlabel("% of GPU time (fp32 training step)")
+    ax.set_xlim(0, max(vals) * 1.18)
+    ax.tick_params(axis="y", length=0)
     save(fig, "profile_breakdown")
 
 
 # ── Sample grids ──────────────────────────────────────────────────────
 
 def fig_samples():
-    """Stack the newest sample grid per run into one preview image."""
-    grids = {}
-    for png in sorted(SAMPLES.glob("*_epoch*.png")):
-        run = png.name.split("_epoch")[0]
-        epoch = int(png.name.split("_epoch")[1].split(".")[0])
-        if run not in grids or epoch > grids[run][0]:
-            grids[run] = (epoch, png)
-    if not grids:
-        print("  [skip] samples: no samples/*_epoch*.png yet")
-        return
+    """A labelled 2x2 of the four MNIST cells' final grids (A/B/C/D order)."""
     from PIL import Image
 
-    imgs = [(run, Image.open(p)) for run, (_, p) in sorted(grids.items())]
-    w = max(im.width for _, im in imgs)
-    total_h = sum(im.height for _, im in imgs)
-    canvas = Image.new("RGB", (w, total_h), "white")
-    y = 0
-    for _, im in imgs:
-        canvas.paste(im, (0, y))
-        y += im.height
-    out = FIG / "samples.png"
-    canvas.save(out)
-    print(f"  wrote {out}  ({', '.join(r for r, _ in imgs)})")
+    cells = [("mnist_unet_eps", "A: UNet $+$ $\\epsilon$"),
+             ("mnist_dit_eps", "B: DiT $+$ $\\epsilon$"),
+             ("mnist_unet_rf", "C: UNet $+$ flow"),
+             ("mnist_dit_rf", "D: DiT $+$ flow")]
+    grids = {}
+    for run, _ in cells:
+        cands = sorted(SAMPLES.glob(f"{run}_epoch*.png"),
+                       key=lambda p: int(p.stem.split("_epoch")[1]))
+        if cands:
+            grids[run] = cands[-1]
+    if len(grids) < 4:
+        print(f"  [skip] samples: found grids for {sorted(grids)} "
+              f"(need all four cells)")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(FULL_W * 0.62, FULL_W * 0.62))
+    for ax, (run, title) in zip(axes.flat, cells):
+        ax.imshow(np.asarray(Image.open(grids[run])))
+        ax.set_title(title, fontsize=8)
+        ax.axis("off")
+    fig.tight_layout()
+    save(fig, "samples")
+    print(f"  (from {', '.join(grids[r].name for r, _ in cells)})")
 
 
 def main():

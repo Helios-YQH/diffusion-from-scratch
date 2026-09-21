@@ -1,0 +1,773 @@
+=== environment ===
+python 3.11.15 | torch 2.13.0+cu126 | cuda True | visible gpus 4
+GPUS=0,1,2,3 (4 visible)  50k samples per point
+0, 48527 MiB, 0 %
+1, 47965 MiB, 0 %
+2, 48527 MiB, 0 %
+3, 40033 MiB, 0 %
+4, 39729 MiB, 100 %
+5, 44653 MiB, 99 %
+
+=== 1/4  DDP vs FSDP (reverse benchmark) ===
+>>> systems ddp (fp32)
+W0921 02:29:37.235000 3229158 site-packages/torch/distributed/run.py:874] 
+W0921 02:29:37.235000 3229158 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 02:29:37.235000 3229158 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 02:29:37.235000 3229158 site-packages/torch/distributed/run.py:874] *****************************************
+Config: configs/celeba_dit_rf.yml  (dit, rf)  batch/GPU=160  world=4
+Model:  DiT  129.6M  46.03 GFLOPs/sample (forward)
+GPU:    NVIDIA RTX A6000
+
+[fp32+ddp] 1407.6 ms/step (cv 0.6%)  455 img/s  peak 33.5 GB  MFU 10.1%
+
+Written: results/systems_celeba_dit_rf.json
+>>> systems fsdp (fp32)
+W0921 02:30:36.751000 3231472 site-packages/torch/distributed/run.py:874] 
+W0921 02:30:36.751000 3231472 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 02:30:36.751000 3231472 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 02:30:36.751000 3231472 site-packages/torch/distributed/run.py:874] *****************************************
+Config: configs/celeba_dit_rf.yml  (dit, rf)  batch/GPU=160  world=4
+Model:  DiT  129.6M  46.03 GFLOPs/sample (forward)
+GPU:    NVIDIA RTX A6000
+
+[fp32+fsdp] 1587.9 ms/step (cv 0.4%)  403 img/s  peak 31.9 GB  MFU 9.0%
+
+Written: results/systems_celeba_dit_rf.json
+
+=== 2/4  CelebA sampler study @ 50k ===
+>>> ddpm_celeba ddim nfe=10 (50k, 4 GPUs)
+W0921 02:31:41.862000 3234474 site-packages/torch/distributed/run.py:874] 
+W0921 02:31:41.862000 3234474 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 02:31:41.862000 3234474 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 02:31:41.862000 3234474 site-packages/torch/distributed/run.py:874] *****************************************
+Checkpoint: checkpoints/ddpm_celeba_best.pt  weights=ema  features=inception
+Backbone: unet  objective: eps  (3ch, 64x64)
+/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W921 02:31:47.229248651 ProcessGroupNCCL.cpp:5276] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+[ema-ddim] NFE=10  n=50000 (12500/rank)
+    generated 64/12500
+    generated 128/12500
+    generated 192/12500
+    generated 256/12500
+    generated 320/12500
+    generated 384/12500
+    generated 448/12500
+    generated 512/12500
+    generated 576/12500
+    generated 640/12500
+    generated 704/12500
+    generated 768/12500
+    generated 832/12500
+    generated 896/12500
+    generated 960/12500
+    generated 1024/12500
+    generated 1088/12500
+    generated 1152/12500
+    generated 1216/12500
+    generated 1280/12500
+    generated 1344/12500
+    generated 1408/12500
+    generated 1472/12500
+    generated 1536/12500
+    generated 1600/12500
+    generated 1664/12500
+    generated 1728/12500
+    generated 1792/12500
+    generated 1856/12500
+    generated 1920/12500
+    generated 1984/12500
+    generated 2048/12500
+    generated 2112/12500
+    generated 2176/12500
+    generated 2240/12500
+    generated 2304/12500
+    generated 2368/12500
+    generated 2432/12500
+    generated 2496/12500
+    generated 2560/12500
+    generated 2624/12500
+    generated 2688/12500
+    generated 2752/12500
+    generated 2816/12500
+    generated 2880/12500
+    generated 2944/12500
+    generated 3008/12500
+    generated 3072/12500
+    generated 3136/12500
+    generated 3200/12500
+    generated 3264/12500
+    generated 3328/12500
+    generated 3392/12500
+    generated 3456/12500
+    generated 3520/12500
+    generated 3584/12500
+    generated 3648/12500
+    generated 3712/12500
+    generated 3776/12500
+    generated 3840/12500
+    generated 3904/12500
+    generated 3968/12500
+    generated 4032/12500
+    generated 4096/12500
+    generated 4160/12500
+    generated 4224/12500
+    generated 4288/12500
+    generated 4352/12500
+    generated 4416/12500
+    generated 4480/12500
+    generated 4544/12500
+    generated 4608/12500
+    generated 4672/12500
+    generated 4736/12500
+    generated 4800/12500
+    generated 4864/12500
+    generated 4928/12500
+    generated 4992/12500
+    generated 5056/12500
+    generated 5120/12500
+    generated 5184/12500
+    generated 5248/12500
+    generated 5312/12500
+    generated 5376/12500
+    generated 5440/12500
+    generated 5504/12500
+    generated 5568/12500
+    generated 5632/12500
+    generated 5696/12500
+    generated 5760/12500
+    generated 5824/12500
+    generated 5888/12500
+    generated 5952/12500
+    generated 6016/12500
+    generated 6080/12500
+    generated 6144/12500
+    generated 6208/12500
+    generated 6272/12500
+    generated 6336/12500
+    generated 6400/12500
+    generated 6464/12500
+    generated 6528/12500
+    generated 6592/12500
+    generated 6656/12500
+    generated 6720/12500
+    generated 6784/12500
+    generated 6848/12500
+    generated 6912/12500
+    generated 6976/12500
+    generated 7040/12500
+    generated 7104/12500
+    generated 7168/12500
+    generated 7232/12500
+    generated 7296/12500
+    generated 7360/12500
+    generated 7424/12500
+    generated 7488/12500
+    generated 7552/12500
+    generated 7616/12500
+    generated 7680/12500
+    generated 7744/12500
+    generated 7808/12500
+    generated 7872/12500
+    generated 7936/12500
+    generated 8000/12500
+    generated 8064/12500
+    generated 8128/12500
+    generated 8192/12500
+    generated 8256/12500
+    generated 8320/12500
+    generated 8384/12500
+    generated 8448/12500
+    generated 8512/12500
+    generated 8576/12500
+    generated 8640/12500
+    generated 8704/12500
+    generated 8768/12500
+    generated 8832/12500
+    generated 8896/12500
+    generated 8960/12500
+    generated 9024/12500
+    generated 9088/12500
+    generated 9152/12500
+    generated 9216/12500
+    generated 9280/12500
+    generated 9344/12500
+    generated 9408/12500
+    generated 9472/12500
+    generated 9536/12500
+    generated 9600/12500
+    generated 9664/12500
+    generated 9728/12500
+    generated 9792/12500
+    generated 9856/12500
+    generated 9920/12500
+    generated 9984/12500
+    generated 10048/12500
+    generated 10112/12500
+    generated 10176/12500
+    generated 10240/12500
+    generated 10304/12500
+    generated 10368/12500
+    generated 10432/12500
+    generated 10496/12500
+    generated 10560/12500
+    generated 10624/12500
+    generated 10688/12500
+    generated 10752/12500
+    generated 10816/12500
+    generated 10880/12500
+    generated 10944/12500
+    generated 11008/12500
+    generated 11072/12500
+    generated 11136/12500
+    generated 11200/12500
+    generated 11264/12500
+    generated 11328/12500
+    generated 11392/12500
+    generated 11456/12500
+    generated 11520/12500
+    generated 11584/12500
+    generated 11648/12500
+    generated 11712/12500
+    generated 11776/12500
+    generated 11840/12500
+    generated 11904/12500
+    generated 11968/12500
+    generated 12032/12500
+    generated 12096/12500
+    generated 12160/12500
+    generated 12224/12500
+    generated 12288/12500
+    generated 12352/12500
+    generated 12416/12500
+    generated 12480/12500
+    generated 12500/12500
+  FID = 30.034   (n=50000, weights=ema, 194.2 img/s)
+  variability across 5 x 10000 subsets: 30.896 +- 0.152
+  written: results/fid_ddpm_celeba.json
+
+sampler    NFE    FID      img/s
+ddim         10   30.034     194.2
+ddim         20   19.133      24.8
+ddim         50   12.748       9.9
+ancestral  1000   11.367       1.9
+>>> ddpm_celeba ddim nfe=20 (50k, 4 GPUs)
+W0921 02:36:42.564000 3246778 site-packages/torch/distributed/run.py:874] 
+W0921 02:36:42.564000 3246778 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 02:36:42.564000 3246778 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 02:36:42.564000 3246778 site-packages/torch/distributed/run.py:874] *****************************************
+Checkpoint: checkpoints/ddpm_celeba_best.pt  weights=ema  features=inception
+Backbone: unet  objective: eps  (3ch, 64x64)
+/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W921 02:36:48.219333425 ProcessGroupNCCL.cpp:5276] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+[ema-ddim] NFE=20  n=50000 (12500/rank)
+    generated 64/12500
+    generated 128/12500
+    generated 192/12500
+    generated 256/12500
+    generated 320/12500
+    generated 384/12500
+    generated 448/12500
+    generated 512/12500
+    generated 576/12500
+    generated 640/12500
+    generated 704/12500
+    generated 768/12500
+    generated 832/12500
+    generated 896/12500
+    generated 960/12500
+    generated 1024/12500
+    generated 1088/12500
+    generated 1152/12500
+    generated 1216/12500
+    generated 1280/12500
+    generated 1344/12500
+    generated 1408/12500
+    generated 1472/12500
+    generated 1536/12500
+    generated 1600/12500
+    generated 1664/12500
+    generated 1728/12500
+    generated 1792/12500
+    generated 1856/12500
+    generated 1920/12500
+    generated 1984/12500
+    generated 2048/12500
+    generated 2112/12500
+    generated 2176/12500
+    generated 2240/12500
+    generated 2304/12500
+    generated 2368/12500
+    generated 2432/12500
+    generated 2496/12500
+    generated 2560/12500
+    generated 2624/12500
+    generated 2688/12500
+    generated 2752/12500
+    generated 2816/12500
+    generated 2880/12500
+    generated 2944/12500
+    generated 3008/12500
+    generated 3072/12500
+    generated 3136/12500
+    generated 3200/12500
+    generated 3264/12500
+    generated 3328/12500
+    generated 3392/12500
+    generated 3456/12500
+    generated 3520/12500
+    generated 3584/12500
+    generated 3648/12500
+    generated 3712/12500
+    generated 3776/12500
+    generated 3840/12500
+    generated 3904/12500
+    generated 3968/12500
+    generated 4032/12500
+    generated 4096/12500
+    generated 4160/12500
+    generated 4224/12500
+    generated 4288/12500
+    generated 4352/12500
+    generated 4416/12500
+    generated 4480/12500
+    generated 4544/12500
+    generated 4608/12500
+    generated 4672/12500
+    generated 4736/12500
+    generated 4800/12500
+    generated 4864/12500
+    generated 4928/12500
+    generated 4992/12500
+    generated 5056/12500
+    generated 5120/12500
+    generated 5184/12500
+    generated 5248/12500
+    generated 5312/12500
+    generated 5376/12500
+    generated 5440/12500
+    generated 5504/12500
+    generated 5568/12500
+    generated 5632/12500
+    generated 5696/12500
+    generated 5760/12500
+    generated 5824/12500
+    generated 5888/12500
+    generated 5952/12500
+    generated 6016/12500
+    generated 6080/12500
+    generated 6144/12500
+    generated 6208/12500
+    generated 6272/12500
+    generated 6336/12500
+    generated 6400/12500
+    generated 6464/12500
+    generated 6528/12500
+    generated 6592/12500
+    generated 6656/12500
+    generated 6720/12500
+    generated 6784/12500
+    generated 6848/12500
+    generated 6912/12500
+    generated 6976/12500
+    generated 7040/12500
+    generated 7104/12500
+    generated 7168/12500
+    generated 7232/12500
+    generated 7296/12500
+    generated 7360/12500
+    generated 7424/12500
+    generated 7488/12500
+    generated 7552/12500
+    generated 7616/12500
+    generated 7680/12500
+    generated 7744/12500
+    generated 7808/12500
+    generated 7872/12500
+    generated 7936/12500
+    generated 8000/12500
+    generated 8064/12500
+    generated 8128/12500
+    generated 8192/12500
+    generated 8256/12500
+    generated 8320/12500
+    generated 8384/12500
+    generated 8448/12500
+    generated 8512/12500
+    generated 8576/12500
+    generated 8640/12500
+    generated 8704/12500
+    generated 8768/12500
+    generated 8832/12500
+    generated 8896/12500
+    generated 8960/12500
+    generated 9024/12500
+    generated 9088/12500
+    generated 9152/12500
+    generated 9216/12500
+    generated 9280/12500
+    generated 9344/12500
+    generated 9408/12500
+    generated 9472/12500
+    generated 9536/12500
+    generated 9600/12500
+    generated 9664/12500
+    generated 9728/12500
+    generated 9792/12500
+    generated 9856/12500
+    generated 9920/12500
+    generated 9984/12500
+    generated 10048/12500
+    generated 10112/12500
+    generated 10176/12500
+    generated 10240/12500
+    generated 10304/12500
+    generated 10368/12500
+    generated 10432/12500
+    generated 10496/12500
+    generated 10560/12500
+    generated 10624/12500
+    generated 10688/12500
+    generated 10752/12500
+    generated 10816/12500
+    generated 10880/12500
+    generated 10944/12500
+    generated 11008/12500
+    generated 11072/12500
+    generated 11136/12500
+    generated 11200/12500
+    generated 11264/12500
+    generated 11328/12500
+    generated 11392/12500
+    generated 11456/12500
+    generated 11520/12500
+    generated 11584/12500
+    generated 11648/12500
+    generated 11712/12500
+    generated 11776/12500
+    generated 11840/12500
+    generated 11904/12500
+    generated 11968/12500
+    generated 12032/12500
+    generated 12096/12500
+    generated 12160/12500
+    generated 12224/12500
+    generated 12288/12500
+    generated 12352/12500
+    generated 12416/12500
+    generated 12480/12500
+    generated 12500/12500
+  FID = 17.789   (n=50000, weights=ema, 97.0 img/s)
+  variability across 5 x 10000 subsets: 18.720 +- 0.089
+  written: results/fid_ddpm_celeba.json
+
+sampler    NFE    FID      img/s
+ddim         10   30.034     194.2
+ddim         20   17.789      97.0
+ddim         50   12.748       9.9
+ancestral  1000   11.367       1.9
+>>> ddpm_celeba ddim nfe=50 (50k, 4 GPUs)
+W0921 02:46:01.916000 3271582 site-packages/torch/distributed/run.py:874] 
+W0921 02:46:01.916000 3271582 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 02:46:01.916000 3271582 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 02:46:01.916000 3271582 site-packages/torch/distributed/run.py:874] *****************************************
+Checkpoint: checkpoints/ddpm_celeba_best.pt  weights=ema  features=inception
+Backbone: unet  objective: eps  (3ch, 64x64)
+/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W921 02:46:07.617094862 ProcessGroupNCCL.cpp:5276] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+[ema-ddim] NFE=50  n=50000 (12500/rank)
+    generated 64/12500
+    generated 128/12500
+    generated 192/12500
+    generated 256/12500
+    generated 320/12500
+    generated 384/12500
+    generated 448/12500
+    generated 512/12500
+    generated 576/12500
+    generated 640/12500
+    generated 704/12500
+    generated 768/12500
+    generated 832/12500
+    generated 896/12500
+    generated 960/12500
+    generated 1024/12500
+    generated 1088/12500
+    generated 1152/12500
+    generated 1216/12500
+    generated 1280/12500
+    generated 1344/12500
+    generated 1408/12500
+    generated 1472/12500
+    generated 1536/12500
+    generated 1600/12500
+    generated 1664/12500
+    generated 1728/12500
+    generated 1792/12500
+    generated 1856/12500
+    generated 1920/12500
+    generated 1984/12500
+    generated 2048/12500
+    generated 2112/12500
+    generated 2176/12500
+    generated 2240/12500
+    generated 2304/12500
+    generated 2368/12500
+    generated 2432/12500
+    generated 2496/12500
+    generated 2560/12500
+    generated 2624/12500
+    generated 2688/12500
+    generated 2752/12500
+    generated 2816/12500
+    generated 2880/12500
+    generated 2944/12500
+    generated 3008/12500
+    generated 3072/12500
+    generated 3136/12500
+    generated 3200/12500
+    generated 3264/12500
+    generated 3328/12500
+    generated 3392/12500
+    generated 3456/12500
+    generated 3520/12500
+    generated 3584/12500
+    generated 3648/12500
+    generated 3712/12500
+    generated 3776/12500
+    generated 3840/12500
+    generated 3904/12500
+    generated 3968/12500
+    generated 4032/12500
+    generated 4096/12500
+    generated 4160/12500
+    generated 4224/12500
+    generated 4288/12500
+    generated 4352/12500
+    generated 4416/12500
+    generated 4480/12500
+    generated 4544/12500
+    generated 4608/12500
+    generated 4672/12500
+    generated 4736/12500
+    generated 4800/12500
+    generated 4864/12500
+    generated 4928/12500
+    generated 4992/12500
+    generated 5056/12500
+    generated 5120/12500
+    generated 5184/12500
+    generated 5248/12500
+    generated 5312/12500
+    generated 5376/12500
+    generated 5440/12500
+    generated 5504/12500
+    generated 5568/12500
+    generated 5632/12500
+    generated 5696/12500
+    generated 5760/12500
+    generated 5824/12500
+    generated 5888/12500
+    generated 5952/12500
+    generated 6016/12500
+    generated 6080/12500
+    generated 6144/12500
+    generated 6208/12500
+    generated 6272/12500
+    generated 6336/12500
+    generated 6400/12500
+    generated 6464/12500
+    generated 6528/12500
+    generated 6592/12500
+    generated 6656/12500
+    generated 6720/12500
+    generated 6784/12500
+    generated 6848/12500
+    generated 6912/12500
+    generated 6976/12500
+    generated 7040/12500
+    generated 7104/12500
+    generated 7168/12500
+    generated 7232/12500
+    generated 7296/12500
+    generated 7360/12500
+    generated 7424/12500
+    generated 7488/12500
+    generated 7552/12500
+    generated 7616/12500
+    generated 7680/12500
+    generated 7744/12500
+    generated 7808/12500
+    generated 7872/12500
+    generated 7936/12500
+    generated 8000/12500
+    generated 8064/12500
+    generated 8128/12500
+    generated 8192/12500
+    generated 8256/12500
+    generated 8320/12500
+    generated 8384/12500
+    generated 8448/12500
+    generated 8512/12500
+    generated 8576/12500
+    generated 8640/12500
+    generated 8704/12500
+    generated 8768/12500
+    generated 8832/12500
+    generated 8896/12500
+    generated 8960/12500
+    generated 9024/12500
+    generated 9088/12500
+    generated 9152/12500
+    generated 9216/12500
+    generated 9280/12500
+    generated 9344/12500
+    generated 9408/12500
+    generated 9472/12500
+    generated 9536/12500
+    generated 9600/12500
+    generated 9664/12500
+    generated 9728/12500
+    generated 9792/12500
+    generated 9856/12500
+    generated 9920/12500
+    generated 9984/12500
+    generated 10048/12500
+    generated 10112/12500
+    generated 10176/12500
+    generated 10240/12500
+    generated 10304/12500
+    generated 10368/12500
+    generated 10432/12500
+    generated 10496/12500
+    generated 10560/12500
+    generated 10624/12500
+    generated 10688/12500
+    generated 10752/12500
+    generated 10816/12500
+    generated 10880/12500
+    generated 10944/12500
+    generated 11008/12500
+    generated 11072/12500
+    generated 11136/12500
+    generated 11200/12500
+    generated 11264/12500
+    generated 11328/12500
+    generated 11392/12500
+    generated 11456/12500
+    generated 11520/12500
+    generated 11584/12500
+    generated 11648/12500
+    generated 11712/12500
+    generated 11776/12500
+    generated 11840/12500
+    generated 11904/12500
+    generated 11968/12500
+    generated 12032/12500
+    generated 12096/12500
+    generated 12160/12500
+    generated 12224/12500
+    generated 12288/12500
+    generated 12352/12500
+    generated 12416/12500
+    generated 12480/12500
+    generated 12500/12500
+  FID = 11.453   (n=50000, weights=ema, 38.8 img/s)
+  variability across 5 x 10000 subsets: 12.413 +- 0.081
+  written: results/fid_ddpm_celeba.json
+
+sampler    NFE    FID      img/s
+ddim         10   30.034     194.2
+ddim         20   17.789      97.0
+ddim         50   11.453      38.8
+ancestral  1000   11.367       1.9
+--- the long one: 1000 NFE x 50k (~1.8 h on 4 GPUs)
+>>> ddpm_celeba ancestral nfe=1000 (50k, 4 GPUs)
+W0921 03:08:15.435000 3323687 site-packages/torch/distributed/run.py:874] 
+W0921 03:08:15.435000 3323687 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 03:08:15.435000 3323687 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 03:08:15.435000 3323687 site-packages/torch/distributed/run.py:874] *****************************************
+Checkpoint: checkpoints/ddpm_celeba_best.pt  weights=ema  features=inception
+Backbone: unet  objective: eps  (3ch, 64x64)
+/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W921 03:08:21.142554119 ProcessGroupNCCL.cpp:5276] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+[ema-ancestral] NFE=1000  n=50000 (12500/rank)
+    generated 64/12500
+    generated 128/12500
+    generated 192/12500
+    generated 256/12500
+    generated 320/12500
+    generated 384/12500
+    generated 448/12500
+    generated 512/12500
+    generated 576/12500
+    generated 640/12500
+    generated 704/12500
+    generated 768/12500
+    generated 832/12500
+    generated 896/12500
+    generated 960/12500
+    generated 1024/12500
+    generated 1088/12500
+    generated 1152/12500
+    generated 1216/12500
+    generated 1280/12500
+W0921 04:08:37.517000 3323687 site-packages/torch/distributed/elastic/agent/server/api.py:753] Received 15 death signal, shutting down workers
+W0921 04:08:37.519000 3323687 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 3323772 closing signal SIGTERM
+W0921 04:08:37.519000 3323687 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 3323773 closing signal SIGTERM
+W0921 04:08:37.519000 3323687 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 3323774 closing signal SIGTERM
+W0921 04:08:37.519000 3323687 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 3323775 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/mnt/14T/houyi/miniconda3/envs/torch/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 374, in launch_agent
+    result = agent.run()
+             ^^^^^^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/elastic/metrics/api.py", line 134, in wrapper
+    result = f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 745, in run
+    result = self._invoke_run(role)
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 923, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 86, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3323687 got signal: 15
+!!! FAILED (exit 1): ddpm_celeba ancestral nfe=1000 (50k, 4 GPUs)
+
+=== 3/4  MNIST cells @ 50k ===
+>>> mnist_unet_eps ancestral nfe=1000 (50k, 4 GPUs)
+W0921 04:08:39.667000 3505707 site-packages/torch/distributed/run.py:874] 
+W0921 04:08:39.667000 3505707 site-packages/torch/distributed/run.py:874] *****************************************
+W0921 04:08:39.667000 3505707 site-packages/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 04:08:39.667000 3505707 site-packages/torch/distributed/run.py:874] *****************************************
+Checkpoint: checkpoints/mnist_unet_eps_best.pt  weights=ema  features=mnist
+Backbone: unet  objective: eps  (1ch, 28x28)
+/mnt/14T/houyi/miniconda3/envs/torch/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W921 04:08:42.589265816 ProcessGroupNCCL.cpp:5276] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+[ema-ancestral] NFE=1000  n=50000 (12500/rank)
+    generated 64/12500
+    generated 128/12500
+    generated 192/12500
+    generated 256/12500

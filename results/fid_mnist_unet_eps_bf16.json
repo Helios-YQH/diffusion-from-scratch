@@ -1,0 +1,44 @@
+{
+  "run_name": "mnist_unet_eps_bf16",
+  "runs": [
+    {
+      "run_name": "mnist_unet_eps_bf16",
+      "sampler": "ddim",
+      "nfe": 20,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 5.4128480324316115,
+      "fid_subset_mean": null,
+      "fid_subset_std": null,
+      "feature_net": "mnist",
+      "sampling_img_s": 327.9474411382482,
+      "git_commit": "4da1725"
+    },
+    {
+      "run_name": "mnist_unet_eps_bf16",
+      "sampler": "ddim",
+      "nfe": 50,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 4.100689063527966,
+      "fid_subset_mean": null,
+      "fid_subset_std": null,
+      "feature_net": "mnist",
+      "sampling_img_s": 130.6178771528748,
+      "git_commit": "4da1725"
+    },
+    {
+      "run_name": "mnist_unet_eps_bf16",
+      "sampler": "ancestral",
+      "nfe": 1000,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 5.562372181943147,
+      "fid_subset_mean": null,
+      "fid_subset_std": null,
+      "feature_net": "mnist",
+      "sampling_img_s": 6.658594905154304,
+      "git_commit": "4da1725"
+    }
+  ]
+}

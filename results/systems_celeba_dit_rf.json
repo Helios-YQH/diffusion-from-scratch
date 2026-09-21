@@ -1,0 +1,85 @@
+{
+  "config": "configs/celeba_dit_rf.yml",
+  "batch_size_per_gpu": 160,
+  "world_size": 1,
+  "steps": 30,
+  "params": 129583920,
+  "forward_flops_per_sample": 46029078528,
+  "gpu_name": "NVIDIA RTX A6000",
+  "results": [
+    {
+      "setting": "bf16",
+      "step_time_s": 0.44217653274536134,
+      "step_time_std_s": 0.000927491105903637,
+      "step_time_cv": 0.002097558412123505,
+      "throughput_img_s": 361.8464304439695,
+      "peak_memory_gb": 21.09642496,
+      "world_size": 1,
+      "global_throughput_img_s": 361.8464304439695,
+      "mfu": 0.32278018918569695
+    },
+    {
+      "setting": "bf16+compile",
+      "step_time_s": 0.4460437854131063,
+      "step_time_std_s": 0.0004478843036252818,
+      "step_time_cv": 0.0010041263173535102,
+      "throughput_img_s": 358.70917885744103,
+      "peak_memory_gb": 21.100258816,
+      "world_size": 1,
+      "global_throughput_img_s": 358.70917885744103,
+      "mfu": 0.3199816465570456
+    },
+    {
+      "setting": "compile",
+      "step_time_s": 1.4152274449666342,
+      "step_time_std_s": 0.005255652898816088,
+      "step_time_cv": 0.003713645405555286,
+      "throughput_img_s": 113.05603249078611,
+      "peak_memory_gb": 32.931364864,
+      "world_size": 1,
+      "global_throughput_img_s": 113.05603249078611,
+      "mfu": 0.10085009685237428
+    },
+    {
+      "setting": "fp32",
+      "step_time_s": 1.3862241109212239,
+      "step_time_std_s": 0.00877232952609716,
+      "step_time_cv": 0.006328218833437729,
+      "throughput_img_s": 115.42145223088855,
+      "peak_memory_gb": 32.932347904,
+      "world_size": 1,
+      "global_throughput_img_s": 115.42145223088855,
+      "mfu": 0.10296013737502654
+    },
+    {
+      "setting": "fp32+ddp",
+      "step_time_s": 1.4076316515604654,
+      "step_time_std_s": 0.008400471902667779,
+      "step_time_cv": 0.005967805493258996,
+      "throughput_img_s": 113.66609995067103,
+      "peak_memory_gb": 33.452598784,
+      "world_size": 4,
+      "global_throughput_img_s": 454.6643998026841,
+      "mfu": 0.1013942992364522
+    },
+    {
+      "setting": "fp32+fsdp",
+      "step_time_s": 1.587893295288086,
+      "step_time_std_s": 0.005962709213144852,
+      "step_time_cv": 0.0037551069903995395,
+      "throughput_img_s": 100.76243817817226,
+      "peak_memory_gb": 31.945732096,
+      "world_size": 4,
+      "global_throughput_img_s": 403.04975271268904,
+      "mfu": 0.08988376317007435
+    }
+  ],
+  "profile_fractions": {
+    "matmul": 0.6763791758350767,
+    "elementwise": 0.15318312505965997,
+    "attention": 0.11091935187930606,
+    "other": 0.03631490946483878,
+    "norm": 0.02295086127906732,
+    "conv": 0.00025257648205115606
+  }
+}

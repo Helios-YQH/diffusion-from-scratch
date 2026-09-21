@@ -1,0 +1,51 @@
+=== environment ===
+python 3.11.15 | torch 2.13.0+cu126 | cuda True | visible gpus 1
+GPUS=2 (1 visible)  50k samples per point
+0, 44885 MiB, 79 %
+1, 47965 MiB, 0 %
+2, 48527 MiB, 0 %
+3, 40033 MiB, 0 %
+4, 1629 MiB, 100 %
+5, 44887 MiB, 86 %
+
+=== 2/4  CelebA sampler study @ 50k ===
+  ddpm_celeba ddim nfe=10 @50k already done — skipping
+  ddpm_celeba ddim nfe=20 @50k already done — skipping
+  ddpm_celeba ddim nfe=50 @50k already done — skipping
+  [skip] the 1000-NFE CelebA 50k point (SKIP_ANCESTRAL_50K=1); the 10k
+         number already in results/ stands for that row
+
+=== 3/4  MNIST cells @ 50k ===
+>>> mnist_unet_eps ancestral nfe=1000 (50k)
+Checkpoint: checkpoints/mnist_unet_eps_best.pt  weights=ema  features=mnist
+Backbone: unet  objective: eps  (1ch, 28x28)
+
+[ema-ancestral] NFE=1000  n=50000 (50000/rank)
+    generated 64/50000
+    generated 128/50000
+    generated 192/50000
+    generated 256/50000
+    generated 320/50000
+    generated 384/50000
+    generated 448/50000
+    generated 512/50000
+    generated 576/50000
+    generated 640/50000
+    generated 704/50000
+    generated 768/50000
+    generated 832/50000
+    generated 896/50000
+    generated 960/50000
+    generated 1024/50000
+    generated 1088/50000
+    generated 1152/50000
+    generated 1216/50000
+    generated 1280/50000
+    generated 1344/50000
+    generated 1408/50000
+    generated 1472/50000
+    generated 1536/50000
+    generated 1600/50000
+    generated 1664/50000
+    generated 1728/50000
+    generated 1792/50000
