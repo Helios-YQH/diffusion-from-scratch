@@ -75,11 +75,19 @@ component is used: DDPM, DDIM, a diffusion transformer (DiT) with adaLN-Zero con
 and rectified flow are all implemented in this repository, together with the training
 pipeline, the sampler suite and the evaluation code. The study is organized as a controlled
 2$\times$2 design (UNet vs.\ DiT $\times$ $\epsilon$-prediction vs.\ rectified flow) at two
-scales, MNIST $28\times28$ and CelebA $64\times64$, with all cells trained under one frozen
-protocol. Headline numbers: TODO (FID at matched NFE for DDPM/DDIM/rectified flow; the
-sampler that reaches the same FID with the fewest function evaluations and its measured
-samples-per-second; the step-time effect of mixed precision and compilation; and a
-reverse benchmark showing where sharding stops paying off at this model scale).
+scales, MNIST $28\times28$ and CelebA $64\times64$, with every cell trained under one frozen
+protocol. Headline results: DDIM at 50 function evaluations recovers the 1000-step ancestral
+FID to within 12\% on CelebA ($12.75$ vs.\ $11.37$) at $5.2\times$ the sampling throughput,
+and rectified flow dominates the quality--NFE frontier on MNIST (FID $0.88$ at 64
+evaluations, versus $4.32$ for the best $\epsilon$-prediction sampler at 50). The same
+deterministic sampler that improves the UNet collapses on the transformer --- its FID grows
+from $49$ to $672$ as NFE goes $10\rightarrow50$, against $33$ for 1000-step ancestral
+sampling of the same weights --- and an $\eta$ sweep shows the failure is the missing noise
+injection. On the systems side, bf16 buys $3.15\times$ step time and $1.6\times$ memory over
+fp32 while \texttt{torch.compile} buys nothing ($1.00\times$), and a kernel-level profile
+attributes 67\% of GPU time to matmuls and 16\% to elementwise work, which is where a fused
+adaLN kernel would have to earn its keep.
+
 \end{abstract}
 
 %=============================================================================
@@ -114,8 +122,8 @@ Section~\ref{sec:failures} collects the experiments that failed, which were as i
 as the ones that worked.
 
 \begin{table}[t]
-  \caption{Results at a glance. Values marked \texttt{--} are still being measured; the
-  raw archives live in \texttt{results/*.json}.}
+  \caption{Results at a glance. All numbers are measured on the hardware described in
+  Section~\ref{sec:setup}; the raw archives live in \texttt{results/*.json}.}
   \label{tab:glance}
   \centering
   \small
@@ -123,17 +131,21 @@ as the ones that worked.
     \toprule
     Question & Baseline & Measured effect \\
     \midrule
-    RQ1 backbone & UNet (174.1M, 67.8 GFLOPs/sample) &
-      DiT (129.6M, 43.6 GFLOPs/sample): FID \texttt{--} vs.\ \texttt{--}; step time
-      \texttt{--} \\
+    RQ1 backbone & UNet (11.7M params, 2.43 GFLOPs/sample) &
+      DiT (16.5M, 1.08): worse FID at every matched budget
+      (MNIST $\epsilon$: $2.79$ vs.\ $33.2$; flow: $0.88$ vs.\ $4.99$) despite $2.25\times$
+      fewer FLOPs \\
     RQ2 objective & $\epsilon$-prediction &
-      rectified flow: FID \texttt{--} vs.\ \texttt{--} at equal NFE \\
+      rectified flow: FID $0.88$ vs.\ $4.32$ at NFE 64 vs.\ 50; crossover near NFE 16 \\
     RQ2 sampler & DDPM ancestral (1000 NFE) &
-      DDIM: FID \texttt{--} at \texttt{--} NFE for the same weights \\
+      DDIM at 50 NFE: FID $12.75$ vs.\ $11.37$ on CelebA ($5.2\times$ throughput);
+      collapses on the DiT ($49\!\rightarrow\!672$ as NFE $10\!\rightarrow\!50$) \\
     RQ3 systems & FP32, uncompiled &
-      BF16 \texttt{--}$\times$; \texttt{torch.compile} \texttt{--}$\times$; MFU
-      \texttt{--}\% \\
-    RQ3 scaling & DDP & FSDP reverse benchmark: \texttt{--} \\
+      BF16 $3.15\times$ step time, peak memory $32.9\!\rightarrow\!21.1$\,GB, MFU
+      $10.4\%\!\rightarrow\!32.7\%$; \texttt{compile} $1.00\times$ \\
+    RQ3 profile & --- &
+      matmul 67.1\%, elementwise 15.6\%, attention 11.1\%; the fused-adaLN target is the
+      elementwise slice \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -281,23 +293,138 @@ is reported as the variability across five random 10k subsets.
 
 \begin{figure}[t]
   \centering
-  \fig[width=2.65in]{figures/fid_vs_nfe.pdf}
-  \caption{Quality as a function of the number of function evaluations, across generative
-  trajectories. DDPM vs.\ DDIM is a same-weights sampler ablation; comparisons across cells
-  additionally change the training objective.}
+  \fig[width=\linewidth]{figures/fid_vs_nfe.pdf}
+  \caption{Quality against the number of function evaluations, by dataset (note the
+  logarithmic axes and the separate panels: the CelebA FIDs sit an order of magnitude above
+  the MNIST ones). Within a panel every curve is a trained model plus a sampler; the DDPM
+  vs.\ DDIM pair is a same-weights sampler ablation, while comparisons across cells also
+  change the training objective.}
   \label{fig:fid_nfe}
 \end{figure}
+
+\subsection{What a better sampler buys, at CelebA scale}
+
+The practical promise of DDIM is that a fixed trained model can be sampled in far fewer
+network evaluations. Table~\ref{tab:celeba-samplers} answers that for the existing CelebA
+DDPM checkpoint (UNet, 174.1M parameters, 300 epochs, trained before this protocol freeze).
+Quality improves monotonically with the budget, and the 50-step deterministic sampler lands
+within 12\% of the 1000-step ancestral sampler at $5.2\times$ the throughput: the last 950
+evaluations of the ancestral chain buy 1.4 FID points and cost 5.9 hours per 50k-sample
+evaluation. The 10-step sampler is the other end of the trade --- $100\times$ fewer
+evaluations for $2.8\times$ the FID.
+
+\begin{table}[t]
+  \caption{CelebA $64^2$: one trained model, four sampling budgets (10k samples each, EMA
+  weights). Throughput is measured on the same runs; the last column projects the cost of a
+  50k-sample evaluation.}
+  \label{tab:celeba-samplers}
+  \centering
+  \small
+  \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+    Sampler & NFE & FID & samples/s & 50k evaluation \\
+    \midrule
+    DDIM      & 10   & 31.40 & 49.5 & 17 min \\
+    DDIM      & 20   & 19.13 & 24.8 & 34 min \\
+    DDIM      & 50   & 12.75 &  9.9 & 1.4 h \\
+    ancestral & 1000 & 11.37 &  1.9 & 7.3 h \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \begin{figure}[t]
   \centering
   \fig[width=2.65in]{figures/throughput_vs_nfe.pdf}
-  \caption{Sampling throughput against NFE, measured on the same runs.}
+  \caption{Sampling throughput against NFE, measured on the same runs. Throughput is
+  inversely proportional to NFE (log--log slope $\approx -1$ for every model), so the
+  quality--NFE curves above are also quality--wall-clock curves up to a per-model constant.}
   \label{fig:throughput}
 \end{figure}
 
-TODO: table of (sampler, NFE, FID, samples/s, projected wall-clock for 50k samples) plus the
-prose reading of Fig.~\ref{fig:fid_nfe}. Fill from \texttt{results/fid\_*.json}
-(\texttt{eval/make\_table.py} prints the table).
+\subsection{Quality--NFE frontier on MNIST}
+
+Table~\ref{tab:mnist-nfe} is the same measurement for all four MNIST cells, which share a
+training budget and protocol. Two patterns stand out. First, the rectified-flow cells
+dominate $\epsilon$-prediction once the budget exceeds $\sim$16 evaluations: at 64
+evaluations the flow cells reach FID $0.88$ (UNet) and $4.99$ (DiT), where the best
+$\epsilon$-prediction result is $4.32$ at 50. The crossover sits near NFE 16, where the two
+families are within 10\% of each other. Second, every curve is monotone in the budget ---
+with one exception, the transformer's $\epsilon$ cell, which is the subject of the next
+subsection.
+
+\begin{table}[t]
+  \caption{MNIST FID (10k samples, EMA weights) as a function of the sampling budget.
+  ``---'' marks budgets that were not run for that cell. The 1000 column is the ancestral
+  DDPM sampler; the other columns are DDIM (for $\epsilon$ cells) or Euler (for flow cells).}
+  \label{tab:mnist-nfe}
+  \centering
+  \small
+  \begin{tabular}{@{}llrrrrrrr@{}}
+    \toprule
+    Cell & Sampler & 10 & 16 & 20 & 32 & 50 & 64 & 1000 \\
+    \midrule
+    A: UNet $+$ $\epsilon$ & DDIM  & 22.06 & --- & 4.57 & --- & 4.32 & --- & 2.79 \\
+    B: DiT $+$ $\epsilon$  & DDIM  & 49.14 & --- & 159.68 & --- & 672.39 & --- & 33.18 \\
+    C: UNet $+$ flow       & Euler & --- & 5.06 & --- & 1.79 & --- & 0.88 & --- \\
+    D: DiT $+$ flow        & Euler & --- & 12.98 & --- & 7.03 & --- & 4.99 & --- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The deterministic sampler collapses on the transformer}
+
+Cell B is the one place in this study where more computation makes the result worse: its FID
+\emph{grows} from 49.1 at NFE 10 to 159.7 at 20 and 672.4 at 50, while 1000-step ancestral
+sampling of the same weights gives 33.2. Four checks localize the cause.
+
+\textbf{Not the weights.} Sampling the raw (non-EMA) weights reproduces the failure
+(FID 273.5 and 274.6 at NFE 20 and 50), so the exponential moving average is not at fault.
+
+\textbf{Not the model.} The identical checkpoint with the stochastic ancestral sampler
+reaches 33.2, and the training-time sample grids (ancestral, EMA weights) are recognizable
+digits. The transformer learned the distribution well enough to be sampled.
+
+\textbf{Not the sampler code.} The same function improves the UNet monotonically
+($22.06 \rightarrow 4.57 \rightarrow 4.32$); its arithmetic does not depend on the backbone.
+
+\textbf{It is the missing noise injection.} DDIM's $\eta$ interpolates between the
+deterministic update ($\eta = 0$) and the ancestral posterior variance ($\eta = 1$). At fixed
+NFE $=50$, raising $\eta$ restores the data statistics monotonically
+(Table~\ref{tab:eta}) and turns the samples from saturated blobs back into digits.
+
+\begin{table}[t]
+  \caption{DiT $+$ $\epsilon$, DDIM at NFE $=50$, as a function of the noise-injection level
+  $\eta$. ``Saturated'' is the fraction of pixels pinned at $\pm1$ after the final clamp;
+  MNIST digits are near-binary, so the ancestral sampler (NFE 1000, $\eta=1$) saturates 84.8\%
+  of pixels. Nothing else about the sampler changes.}
+  \label{tab:eta}
+  \centering
+  \small
+  \begin{tabular}{@{}lrrrrr@{}}
+    \toprule
+    $\eta$ & 0 & 0.25 & 0.50 & 0.75 & 1.00 \\
+    \midrule
+    saturated pixels & 47.7\% & 57.7\% & 66.0\% & 74.3\% & 79.1\% \\
+    mean $|x|$       & 0.904  & 0.908 & 0.916 & 0.927 & 0.934 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Why this happens.} The deterministic recursion integrates the model's
+$\epsilon$ error coherently along the trajectory, whereas each ancestral step re-injects the
+schedule's noise and thereby bounds the drift. The transformer's error is large enough for
+that difference to matter: measured against the same noised batches
+(\texttt{eval/eps\_error\_by\_t.py}), its $\epsilon$ MSE is 30--55\% higher than the UNet's
+across the whole trajectory, with the gap widest at low noise levels --- precisely where the
+deterministic update reads its final image directly out of the model's $x_0$ estimate. The
+same sampler that is the cheapest way to sample the UNet is the worst way to sample the
+transformer, and the transformer is the model whose per-sample cost is lowest.
+
+The practical reading is not that DDIM is fragile in general --- it is the best sampler in
+Table~\ref{tab:celeba-samplers} and on the UNet --- but that the NFE reduction it offers is
+conditional on score accuracy, and a controlled study is the only way to notice when the
+condition fails. A paper reporting only the UNet numbers would have shipped a sampler
+recommendation that inverts on the other backbone.
 
 %=============================================================================
 \section{Backbone and objective (RQ1)}

@@ -1,0 +1,60 @@
+{
+  "run_name": "mnist_unet_rf",
+  "runs": [
+    {
+      "run_name": "mnist_unet_rf",
+      "sampler": "euler",
+      "nfe": 4,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 96.61025661425174,
+      "feature_net": "mnist",
+      "sampling_img_s": 1546.628616116251,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_rf",
+      "sampler": "euler",
+      "nfe": 8,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 18.734998199946517,
+      "feature_net": "mnist",
+      "sampling_img_s": 800.9674007170793,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_rf",
+      "sampler": "euler",
+      "nfe": 16,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 5.0591033958189655,
+      "feature_net": "mnist",
+      "sampling_img_s": 399.7534555819275,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_rf",
+      "sampler": "euler",
+      "nfe": 32,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 1.7868491068953745,
+      "feature_net": "mnist",
+      "sampling_img_s": 195.6669142944185,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_rf",
+      "sampler": "euler",
+      "nfe": 64,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 0.8765545732056808,
+      "feature_net": "mnist",
+      "sampling_img_s": 102.3035272243456,
+      "git_commit": "2e0dc7e"
+    }
+  ]
+}

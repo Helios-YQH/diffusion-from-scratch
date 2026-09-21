@@ -125,6 +125,10 @@ def build_parser(config_path):
                         help="UNet base channels (default: 128 for celeba, 64 for mnist)")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader workers")
+    parser.add_argument("--bf16", action="store_true", default=False,
+                        help="Autocast the training step to bf16 (default: fp32, "
+                             "which is the frozen protocol; use this to measure "
+                             "the quality cost of mixed precision)")
     return parser
 
 

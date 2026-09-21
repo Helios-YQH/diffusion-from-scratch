@@ -1,0 +1,71 @@
+{
+  "run_name": "mnist_dit_eps",
+  "runs": [
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ddim",
+      "nfe": 10,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 49.13598344391664,
+      "feature_net": "mnist",
+      "sampling_img_s": 919.48475405719,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ddim",
+      "nfe": 20,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 159.67932194567527,
+      "feature_net": "mnist",
+      "sampling_img_s": 465.93129877711897,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ddim",
+      "nfe": 20,
+      "n": 2000,
+      "weights": "raw",
+      "fid": 273.5108766878275,
+      "feature_net": "inception",
+      "sampling_img_s": 245.07338288123472,
+      "git_commit": "21e67d2"
+    },
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ddim",
+      "nfe": 50,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 672.3876165636498,
+      "feature_net": "mnist",
+      "sampling_img_s": 187.9355897587976,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ddim",
+      "nfe": 50,
+      "n": 2000,
+      "weights": "raw",
+      "fid": 274.63585187600756,
+      "feature_net": "inception",
+      "sampling_img_s": 141.25509526761869,
+      "git_commit": "21e67d2"
+    },
+    {
+      "run_name": "mnist_dit_eps",
+      "sampler": "ancestral",
+      "nfe": 1000,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 33.177222322987745,
+      "feature_net": "mnist",
+      "sampling_img_s": 35.89330941614441,
+      "git_commit": "21e67d2"
+    }
+  ]
+}

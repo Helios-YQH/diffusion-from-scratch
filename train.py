@@ -518,7 +518,9 @@ def train(args):
 
         for batch in pbar:
             x0 = to_model_input(batch[0], device)
-            loss = diffusion.training_loss(x0)
+            use_bf16 = getattr(args, "bf16", False) and str(device).startswith("cuda")
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                loss = diffusion.training_loss(x0)
             opt.zero_grad()
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(

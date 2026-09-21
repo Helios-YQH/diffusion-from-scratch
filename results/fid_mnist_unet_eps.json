@@ -1,0 +1,49 @@
+{
+  "run_name": "mnist_unet_eps",
+  "runs": [
+    {
+      "run_name": "mnist_unet_eps",
+      "sampler": "ddim",
+      "nfe": 10,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 22.059240974370596,
+      "feature_net": "mnist",
+      "sampling_img_s": 636.119193423532,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_eps",
+      "sampler": "ddim",
+      "nfe": 20,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 4.571757575559104,
+      "feature_net": "mnist",
+      "sampling_img_s": 326.5475001046566,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_eps",
+      "sampler": "ddim",
+      "nfe": 50,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 4.315435875059961,
+      "feature_net": "mnist",
+      "sampling_img_s": 131.83700772076676,
+      "git_commit": "2e0dc7e"
+    },
+    {
+      "run_name": "mnist_unet_eps",
+      "sampler": "ancestral",
+      "nfe": 1000,
+      "n": 10000,
+      "weights": "ema",
+      "fid": 2.790480331240701,
+      "feature_net": "mnist",
+      "sampling_img_s": 25.860655200787058,
+      "git_commit": "21e67d2"
+    }
+  ]
+}

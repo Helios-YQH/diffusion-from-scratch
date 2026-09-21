@@ -91,17 +91,33 @@ def fig_fid_vs_nfe():
     if not data:
         print("  [skip] fid_vs_nfe: no results/fid_*.json yet")
         return
-    fig, ax = plt.subplots(figsize=(COL_W, 2.1))
+
+    # Split by dataset: the CelebA FIDs sit an order of magnitude above the
+    # MNIST ones, so a shared axis would flatten both.
+    groups = {"MNIST $28^2$": [], "CelebA $64^2$": []}
+    for d in data:
+        key = "MNIST $28^2$" if d["run_name"].startswith("mnist") else "CelebA $64^2$"
+        groups[key].append(d)
+
     colors = [BLUE, ORANGE, GREEN, RED, PURPLE, SKY]
-    for d, color in zip(data, colors):
-        runs = sorted(d["runs"], key=lambda r: r["nfe"])
-        xs = [r["nfe"] for r in runs]
-        ys = [r["fid"] for r in runs]
-        ax.plot(xs, ys, marker="o", ms=3, lw=1.2, color=color, label=d["run_name"])
-    ax.set_xscale("log", base=2)
-    ax.set_xlabel("NFE (function evaluations)")
-    ax.set_ylabel("FID")
-    ax.legend(frameon=False)
+    fig, axes = plt.subplots(1, 2, figsize=(FULL_W, 2.0))
+    for ax, (title, runs) in zip(axes, groups.items()):
+        for d, color in zip(sorted(runs, key=lambda x: x["run_name"]), colors):
+            pts = sorted(d["runs"], key=lambda r: r["nfe"])
+            if not pts:
+                continue
+            ax.plot([r["nfe"] for r in pts], [r["fid"] for r in pts],
+                    marker="o", ms=3, lw=1.2, color=color,
+                    label=d["run_name"].replace("mnist_", "").replace("ddpm_", ""))
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.set_xlabel("NFE (function evaluations)")
+        ax.set_ylabel("FID")
+        ax.set_title(title, fontsize=8)
+        ax.legend(frameon=False, fontsize=6,
+                  loc="lower left" if "MNIST" in title else "upper right",
+                  handlelength=1.4, borderpad=0.2)
+    fig.tight_layout()
     save(fig, "fid_vs_nfe")
 
 
