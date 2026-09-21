@@ -67,6 +67,21 @@ plt.rcParams.update({
 })
 
 
+def add_panel_labels(axes, labels="ab"):
+    """NeurIPS-style (a)/(b) panel labels, aligned by construction.
+
+    Each label is anchored to its axes' top-left corner in axes fraction and
+    then shifted by the *same* point offset — so labels line up across a row
+    even when the panels' tick labels differ in width (the failure mode of
+    hand-placed ax.text; see scipilot-figure-skill's layout_tools for the same
+    approach).
+    """
+    for ax, lab in zip(axes, labels):
+        ax.annotate(f"({lab})", xy=(0, 1), xycoords="axes fraction",
+                    xytext=(-2, 3), textcoords="offset points",
+                    fontsize=8.5, fontweight="bold", ha="right", va="bottom")
+
+
 def save(fig, name):
     pdf = FIG / f"{name}.pdf"
     fig.savefig(pdf, bbox_inches="tight")
@@ -162,6 +177,7 @@ def _fid_panels(key, ylabel, logy, value_key="fid"):
         ax.set_ylabel(ylabel)
         ax.set_title(titles[key_name], fontsize=8)
         ax.legend(frameon=False, loc="best", handlelength=1.5, borderpad=0.2)
+    add_panel_labels(axes)
     fig.tight_layout()
     return fig
 
