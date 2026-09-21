@@ -101,8 +101,13 @@ fi
 echo | tee -a "$LOG"
 echo "=== 2/4  CelebA sampler study @ 50k ===" | tee -a "$LOG"
 fid ddpm_celeba inception ddim 10 20 50
-echo "--- the long one: 1000 NFE x 50k (~1.8 h on $NGPU GPUs)" | tee -a "$LOG"
-fid ddpm_celeba inception ancestral 1000
+if [ "${SKIP_ANCESTRAL_50K:-0}" = "1" ]; then
+  echo "  [skip] the 1000-NFE CelebA 50k point (SKIP_ANCESTRAL_50K=1); the 10k" | tee -a "$LOG"
+  echo "         number already in results/ stands for that row" | tee -a "$LOG"
+else
+  echo "--- the long one: 1000 NFE x 50k (~1.8 h on 4 GPUs, ~7 h on one)" | tee -a "$LOG"
+  fid ddpm_celeba inception ancestral 1000
+fi
 
 # ── 3. MNIST 2x2 at 50k -------------------------------------------------
 echo | tee -a "$LOG"
