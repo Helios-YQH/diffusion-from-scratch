@@ -80,10 +80,10 @@ protocol. Headline results: DDIM at 50 function evaluations matches the 1000-ste
 sampler on CelebA (FID $11.45$ vs.\ $11.37$) at $20\times$ the sampling throughput,
 and rectified flow dominates the quality--NFE frontier on MNIST (FID $0.88$ at 64
 evaluations, versus $4.32$ for the best $\epsilon$-prediction sampler at 50). The same
-deterministic sampler that improves the UNet collapses on the transformer --- its FID grows
-from $49$ to $672$ as NFE goes $10\rightarrow50$, against $33$ for 1000-step ancestral
-sampling of the same weights --- and an $\eta$ sweep shows the failure is the missing noise
-injection. On the systems side, bf16 buys $3.15\times$ step time and $1.6\times$ memory over
+deterministic sampler that improves the UNet collapses on the transformer: its FID grows from
+$49$ to $672$ as NFE goes $10\rightarrow50$, against $33$ for 1000-step ancestral sampling of
+the same weights. An $\eta$ sweep shows the failure is the missing noise injection. On the
+systems side, bf16 buys $3.15\times$ step time and $1.6\times$ memory over
 fp32 while \texttt{torch.compile} buys nothing ($1.00\times$), and a kernel-level profile
 attributes 67\% of GPU time to matmuls and 16\% to elementwise work, which is where a fused
 adaLN kernel would have to earn its keep.
@@ -95,10 +95,9 @@ adaLN kernel would have to earn its keep.
 %=============================================================================
 
 Diffusion models are usually consumed through a library: a scheduler object, a pretrained
-backbone, a pipeline. This report takes the opposite route. Everything is built from
-scratch --- the forward and reverse processes, the two backbones, both training objectives,
-the samplers and the evaluation --- and every claim is backed by a measurement produced by
-this repository.
+backbone, a pipeline. This report takes the opposite route. Everything is built from scratch,
+including the forward and reverse processes, the two backbones, both training objectives, the
+samplers and the evaluation.
 
 The study asks three questions:
 
@@ -187,10 +186,9 @@ the solver used to walk back from noise to data.
   \label{fig:paths}
 \end{figure}
 
-One implementation detail is easy to get wrong and worth stating: the sinusoidal timestep
-embedding used by both backbones is calibrated for $t \in [0, 1000]$ (the DDPM range). The
-flow code therefore keeps its path mathematics in $t\in[0,1]$ but passes $t\times1000$ to the
-network; without that scaling the embedding is nearly constant and conditioning collapses.
+Both backbones embed the timestep with a sinusoidal basis calibrated for $t \in [0, 1000]$, the
+DDPM range. The flow code keeps its path mathematics in $t\in[0,1]$ and passes $t\times1000$ to
+the network; without that scaling the embedding is nearly constant and conditioning collapses.
 
 %=============================================================================
 \section{Implementation}
@@ -198,9 +196,9 @@ network; without that scaling the embedding is nearly constant and conditioning 
 %=============================================================================
 
 Everything is written in PyTorch, with no generative-model library. Table~\ref{tab:models}
-lists the measured sizes. Note that the parameter ranking and the FLOPs ranking disagree
-across scales --- on CelebA the UNet is larger on both axes, on MNIST it has fewer
-parameters but more FLOPs --- which is exactly why both are reported.
+lists the measured sizes. The parameter ranking and the FLOPs ranking disagree across scales:
+on CelebA the UNet is larger on both axes, while on MNIST it has fewer parameters but more
+FLOPs.
 
 \begin{table}[t]
   \caption{Measured sizes (forward pass, one sample at the model's native resolution).
@@ -250,11 +248,10 @@ the other --- and the cross-domain link traverses PCIe \emph{and} the inter-sock
 interconnect. This topology is why every multi-GPU measurement in this report runs inside a
 single domain and sets \texttt{NCCL\_P2P\_DISABLE=1} (Section~\ref{sec:failures}).
 
-The node is shared, and that is part of the measurement conditions rather than an aside:
-during these runs four other training jobs held between 0.5 and 47\,GB on the remaining
-cards, so the GPU was never exclusively ours. The single-GPU settings sweep (30 steps plus
-five discarded warmups, coefficient of variation 0.1--0.6\%) is the least exposed to that
-contention; the throughput columns of the FID tables are global rates from 4-GPU sharded
+The node is shared. During these runs four other training jobs held between 0.5 and 47\,GB on
+the remaining cards, so the GPU was never exclusively ours. The single-GPU settings sweep (30
+steps plus five discarded warmups, coefficient of variation 0.1--0.6\%) is the least exposed to
+that contention; the throughput columns of the FID tables are global rates from 4-GPU sharded
 sweeps and should be read as such. Software: Python 3.11 and PyTorch 2.13.0 (+cu126).
 
 \textbf{Protocol.} All MNIST cells share one frozen protocol: identical optimizer,
@@ -320,12 +317,11 @@ evaluations of the ancestral chain buy 0.1 FID points and cost 7.1 hours per 50k
 evaluation. The 10-step sampler is the other end of the trade --- $5\times$ fewer evaluations
 than the 50-step sampler for $2.6\times$ the FID.
 
-The spread column is worth reading carefully. A 10k subset reads about 1 FID unit *higher*
-than the 50k measurement of the same sampler ($12.41 \pm 0.08$ vs.\ $11.45$ for DDIM at 50
-NFE), which means the 10k ancestral number in the last row is if anything pessimistic: the
-two rows' gap on equal footing is smaller than the table's raw numbers suggest. This is the
-sample-count dependence the frozen protocol's variability requirement exists to expose, and
-it is why the deterministic rows here are reported at 50k.
+A 10k subset reads about 1 FID unit \emph{higher} than the 50k measurement of the same sampler
+($12.41 \pm 0.08$ vs.\ $11.45$ for DDIM at 50 NFE), so the 10k ancestral number in the last row
+is if anything pessimistic: on equal footing the gap between the two rows is smaller than the
+table's raw numbers suggest. This sample-count dependence is why the deterministic rows here
+are reported at 50k and the expensive ancestral row is not.
 
 \begin{table}[t]
   \caption{CelebA $64^2$: one trained model, four sampling budgets (EMA weights). The
@@ -361,13 +357,11 @@ it is why the deterministic rows here are reported at 50k.
 \subsection{Quality--NFE frontier on MNIST}
 
 Table~\ref{tab:mnist-nfe} is the same measurement for all four MNIST cells, which share a
-training budget and protocol. Two patterns stand out. First, the rectified-flow cells
-dominate $\epsilon$-prediction once the budget exceeds $\sim$16 evaluations: at 64
-evaluations the flow cells reach FID $0.88$ (UNet) and $4.99$ (DiT), where the best
-$\epsilon$-prediction result is $4.32$ at 50. The crossover sits near NFE 16, where the two
-families are within 10\% of each other. Second, every curve is monotone in the budget ---
-with one exception, the transformer's $\epsilon$ cell, which is the subject of the next
-subsection.
+training budget and protocol. The rectified-flow cells dominate $\epsilon$-prediction once the
+budget exceeds $\sim$16 evaluations: at 64 evaluations the flow cells reach FID $0.88$ (UNet)
+and $4.99$ (DiT), where the best $\epsilon$-prediction result is $4.32$ at 50. Every curve is
+monotone in the budget except the transformer's $\epsilon$ cell, which is the subject of the
+next subsection.
 
 \begin{table}[t]
   \caption{MNIST FID (10k samples, EMA weights) as a function of the sampling budget.
@@ -437,11 +431,9 @@ deterministic update reads its final image directly out of the model's $x_0$ est
 same sampler that is the cheapest way to sample the UNet is the worst way to sample the
 transformer, and the transformer is the model whose per-sample cost is lowest.
 
-The practical reading is not that DDIM is fragile in general --- it is the best sampler in
-Table~\ref{tab:celeba-samplers} and on the UNet --- but that the NFE reduction it offers is
-conditional on score accuracy, and a controlled study is the only way to notice when the
-condition fails. A paper reporting only the UNet numbers would have shipped a sampler
-recommendation that inverts on the other backbone.
+DDIM is not fragile in general: it is the best sampler in Table~\ref{tab:celeba-samplers} and
+on the UNet. Its NFE reduction is conditional on score accuracy, and the condition is invisible
+unless both backbones are measured.
 
 %=============================================================================
 \section{Backbone and objective (RQ1)}
@@ -474,8 +466,6 @@ measured (Table~\ref{tab:mnist-nfe}), so it is not an artefact of one sampler.
   \end{tabular}
 \end{table}
 
-Two caveats belong next to that table, and they cut in opposite directions.
-
 \textbf{Parameters are not compute.} The DiT has \emph{more} parameters (16.5M vs.\ 11.7M)
 and \emph{less} compute (1.08 vs.\ 2.43 GFLOPs per sample): its parameters sit in a wide MLP
 over 49 tokens, while the UNet spends its compute on convolutions at $28^2$. The comparison
@@ -486,10 +476,9 @@ report does not run.
 \textbf{The objective comparison is the cleaner of the two.} Cells C and D differ from A and
 B only in the regression target and the sampler, and the same ordering appears at every
 budget: rectified flow reaches FID $0.88$ where $\epsilon$-prediction plateaus at $4.32$. The
-crossover sits near NFE 16, so the flow objective buys a $8\times$ reduction in evaluations
-on the cheap end of the curve, and a $4.9\times$ lower FID on the expensive end. This is the
-expected result --- a straighter path is easier to integrate --- and it reproduces on both
-backbones, which is what makes it credible.
+flow objective buys an $8\times$ reduction in evaluations at the cheap end of the curve and a
+$4.9\times$ lower FID at the expensive end. A straighter path is easier to integrate, and the
+effect reproduces on both backbones.
 
 \begin{figure}[t]
   \centering
@@ -548,92 +537,67 @@ less peak memory, and nothing else we tried moves the needle. That single number
 the larger-scale experiments in this project affordable at all: the CelebA cells below cost
 $\sim$36 and $\sim$55 GPU-hours in fp32 and under 12 and 18 in bf16.
 
-\textbf{\dots and it is not free.} Acting on the previous paragraph, one MNIST cell was
-retrained under the identical protocol with the training step autocast to bf16 --- the point
-being to price the speedup instead of assuming it. The training loss is unchanged to three
-digits ($0.0194$ vs.\ $0.0193$), but the sampled quality is not: the bf16 checkpoint scores
-FID $5.56$ where the fp32 one scores $2.79$ on the 1000-step ancestral sampler, while the two
-sit within noise of each other at 50 steps ($4.10$ vs.\ $4.32$). That is the same signature
-Section~\ref{sec:samplers} found for the transformer --- an error the long trajectory
-accumulates and the short one hides --- appearing here from precision rather than from
-training. One cell and one seed is thin evidence, and we report it as an observation, not a
-law; but it is enough that we do not quote $3.15\times$ as free, and it is why no quality
-number in this report comes from a mixed-precision run.
+\textbf{The speedup is not free.} One MNIST cell was retrained under the identical protocol
+with the training step autocast to bf16, to price the speedup rather than assume it. The
+training loss is unchanged to three digits ($0.0194$ vs.\ $0.0193$), but the sampled quality is
+not: the bf16 checkpoint scores FID $5.56$ where the fp32 one scores $2.79$ on the 1000-step
+ancestral sampler, while the two sit within noise of each other at 50 steps ($4.10$ vs.\
+$4.32$). This is the signature Section~\ref{sec:samplers} found for the transformer, an error
+the long trajectory accumulates and the short one hides, appearing here from precision rather
+than from training. One cell and one seed is thin evidence, but it is enough that we do not
+quote $3.15\times$ as free, and it is why no quality number in this report comes from a
+mixed-precision run.
 
-\textbf{Compilation buys nothing here.} \texttt{torch.compile} returns $1.00\times$ --- the same
-step time to three digits --- which is a negative result worth stating plainly. Two
-explanations are consistent with the profile: 67\% of GPU time is already inside cuBLAS
-matmuls that have little to fuse, and the fusible elementwise work sits between large kernels
-rather than accumulating in a long chain.
+\textbf{Compilation buys nothing here.} \texttt{torch.compile} returns $1.00\times$, the same
+step time to three digits. Two explanations are consistent with the profile: 67\% of GPU time
+is already inside cuBLAS matmuls that have little to fuse, and the fusible elementwise work
+sits between large kernels rather than accumulating in a long chain.
 
-\textbf{Why FSDP loses at this scale.} FSDP is $12.8\%$ slower than DDP and saves only 4.8\%
-of peak memory --- which is the prediction this benchmark was built to check. The peak is
-dominated by activations: at batch 160 the model's parameters, gradients and Adam state
-together account for roughly 2\,GB of the 33.5\,GB peak, so sharding them cannot help, while
-the all-gather and reduce-scatter on the critical path cost real time. Fully sharded training
-is a tool for models whose \emph{states} dominate their memory; at 130M parameters on 48\,GB
-cards, that condition is not met.
+\textbf{Why FSDP loses at this scale.} FSDP is $12.8\%$ slower than DDP and saves 4.8\% of
+peak memory. The peak is dominated by activations: at batch 160 the model's parameters,
+gradients and Adam state together account for roughly 2\,GB of the 33.5\,GB peak, so sharding
+them cannot help, while the all-gather and reduce-scatter on the critical path cost real time.
+Sharding pays when the model's \emph{states} rather than its activations set the ceiling, which
+at 130M parameters on 48\,GB cards they do not.
 
-\textbf{Reading the MFU column.} The $10.4\%$ fp32 and $32.7\%$ bf16 figures come from
-measured FLOPs (46.0 GFLOPs per sample, forward, counted by
-\texttt{torch.utils.flop\_counter}) against the A6000's dense peak. Two caveats apply: the
-counter covers matmul and convolution work only, so elementwise-heavy operations are invisible
-to it (a fused-adaLN kernel would have to earn its keep out of the 15.3\% slice in
-Fig.~\ref{fig:profile}, not out of the FLOPs number); and this is a 130M-parameter model at
-256 tokens, so neither the batch nor the sequence length is large enough to saturate tensor
-cores. The honest summary is that bf16 moved this workload from "not using the tensor cores"
-to "using them moderately".
+\textbf{Reading the MFU column.} The $10.4\%$ fp32 and $32.7\%$ bf16 figures come from measured
+FLOPs (46.0 GFLOPs per sample, forward, counted by \texttt{torch.utils.flop\_counter}) against
+the A6000's dense peak. The counter covers matmul and convolution work only, so elementwise
+operations are invisible to it; a fused-adaLN kernel would have to earn its keep out of the
+15.3\% slice in Fig.~\ref{fig:profile}, not out of the FLOPs number. The model also runs at 256
+tokens with batch 160, which is not enough of either to saturate tensor cores, so bf16 moves
+this workload from barely using the tensor cores to using them moderately.
 
 %=============================================================================
 \section{What didn't work}
 \label{sec:failures}
 %=============================================================================
 
-Each entry follows the same shape: hypothesis, setup, observation, diagnosis, resolution,
-lesson.
+\textbf{Learning rate $5\times10^{-4}$ collapses training.} The first CelebA run used
+$5\times10^{-4}$ on the assumption that Adam's normalisation made it safe. The loss diverged
+and the samples degraded into noise, leaving no usable checkpoint: at that rate the early
+updates in the high-noise regime leave the region where the $\epsilon$-prediction loss is
+informative, and the optimiser does not return. This protocol uses $2\times10^{-4}$ with
+gradient clipping at 1.0 and logs the gradient norm every step, so the failure is visible
+before the loss is. Every cell in this report shares that pair of settings.
 
-\textbf{Learning rate $5\times10^{-4}$ collapses training.}
-\emph{Hypothesis:} the 5$\times10^{-4}$ rate used by the first CelebA run was safe because
-Adam is self-normalizing. \emph{Observation:} the loss diverged and the samples degraded into
-noise; the run produced no usable checkpoint. \emph{Diagnosis:} at that rate the early
-updates in the high-noise regime were large enough to leave the region where the
-$\epsilon$-prediction loss is informative, and the optimizer could not return. \emph{Resolution:}
-the protocol in this report uses $2\times10^{-4}$ with gradient clipping at 1.0, and logs the
-gradient norm every step so the failure is visible before the loss is. \emph{Lesson:} the
-learning rate and the clipping threshold are part of the protocol, not tuning details ---
-which is why every cell here shares one pair of them.
+\textbf{DataParallel deadlocks with a multi-worker DataLoader.} The first multi-GPU
+configuration used \texttt{nn.DataParallel} and hung reliably, with no error output, whenever
+the DataLoader used worker processes. DataParallel replicates the module per forward pass and
+serialises it through one process, which interacts badly with forked workers pinning memory.
+The stack was rewritten around torchrun-native DDP, which every run here uses.
 
-\textbf{DataParallel deadlocks with a multi-worker DataLoader.}
-\emph{Hypothesis:} \texttt{nn.DataParallel} is the cheap way to use several GPUs for a model
-that fits on one. \emph{Observation:} the first multi-GPU configuration hung, reliably, with
-no error output, when the DataLoader used worker processes. \emph{Diagnosis:} DataParallel
-replicates the module per forward pass and serialises it through a single process, which
-interacts badly with forked workers pinning memory. \emph{Resolution:} the training stack was
-rewritten around torchrun-native DDP, which is what every run in this report uses.
-\emph{Lesson:} for anything beyond a single forward pass, DDP is both simpler and faster.
+\textbf{P2P hangs on this node's NUMA layout.} A hang remained after the move to DDP, and
+\texttt{nvidia-smi topo -m} explained it: the six GPUs split across two NUMA domains (0--3 and
+4--5), with the cross-domain link traversing PCIe and the inter-socket interconnect. A job
+spanning both domains hung in its first collective; a job confined to one domain ran. NCCL's
+peer-to-peer transport does not complete over that link, so every multi-GPU measurement here
+sets \texttt{NCCL\_P2P\_DISABLE=1} and stays inside one domain. On shared hardware the topology
+is part of the experiment setup, and measuring it once is cheaper than debugging it later.
 
-\textbf{P2P hangs on this node's NUMA layout.}
-\emph{Hypothesis:} with DDP in place, the remaining hang was a software bug.
-\emph{Observation:} \texttt{nvidia-smi topo -m} showed the six GPUs split across two NUMA
-domains (0--3 and 4--5) with the cross-domain link traversing PCIe \emph{and} the inter-socket
-interconnect; a job spanning both domains hung in the first collective while a job confined to
-one domain ran. \emph{Diagnosis:} NCCL's peer-to-peer transport over that link does not
-complete. \emph{Resolution:} \texttt{NCCL\_P2P\_DISABLE=1}, plus a rule that DDP jobs stay
-inside one domain --- both of which every multi-GPU measurement in this report honours.
-\emph{Lesson:} on shared hardware the topology is part of the experiment setup, and it is
-cheaper to measure it once than to debug it later.
-
-\textbf{FSDP is a net loss at this scale.}
-\emph{Hypothesis:} sharding parameters, gradients and optimizer state should reduce the
-memory peak and let the batch grow. \emph{Observation:} at 130M parameters and batch 160 per
-GPU, FSDP ran $12.8\%$ slower than DDP and saved 4.8\% of peak memory
-(Table~\ref{tab:cost}). \emph{Diagnosis:} the peak is activation-dominated --- the sharded
-states are $\sim$2\,GB of a 33.5\,GB peak --- so the all-gather pays for itself only when
-parameters rather than activations set the ceiling. \emph{Resolution:} reported as a
-deliberate reverse benchmark rather than removed; the criterion it establishes
-(states $>$ activations) is the one to check before reaching for FSDP at this scale.
-\emph{Lesson:} a negative result with a stated criterion is more useful than an unmeasured
-technique in the toolbelt.
+\textbf{FSDP is a net loss at this scale.} Measured in Table~\ref{tab:cost} and accounted for
+in Section~\ref{sec:systems}. It stays in the report because the criterion is the useful part:
+sharding pays when a model's optimiser states, not its activations, set the memory ceiling.
 
 %=============================================================================
 \section{Discussion and limitations}
@@ -672,12 +636,12 @@ compute" rather than as a claim about transformers in general.
   \item The reported timings use fp32 training, and no quality number in this report comes
         from a mixed-precision run. bf16 was measured for speed (Table~\ref{tab:cost}) and,
         in one cell, for quality: the training loss matched to three digits while the
-        1000-step FID doubled. That is one seed and one cell --- an observation, not a
-        characterisation of where the boundary lies.
+        1000-step FID doubled. That is one seed and one cell, so it locates a failure mode
+        without marking where it starts.
   \item The transformer's deterministic-sampler collapse (Section~\ref{sec:samplers}) is
-        characterised at one scale with one model. The $\eta$ sweep localises the mechanism
-        --- the absence of noise injection --- but where the boundary lies, and whether it
-        moves with more training or more parameters, is not measured.
+        characterised at one scale with one model. The $\eta$ sweep localises the mechanism to
+        the absence of noise injection; whether the boundary moves with more training or more
+        parameters is not measured.
 \end{itemize}
 
 %=============================================================================
